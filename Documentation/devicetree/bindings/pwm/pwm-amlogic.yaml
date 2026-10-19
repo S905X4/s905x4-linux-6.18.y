@@ -9,6 +9,18 @@ title: Amlogic PWM
 maintainers:
   - Heiner Kallweit <hkallweit1@gmail.com>
 
+description: |
+  SC2 takes one external clock per primary channel, like S4. Its secondary
+  counters and blink controls are not exposed as additional PWM channels.
+  Clock parent selection is explicit: rate changes retain the selected
+  input, so a clock or regulator consumer does not silently acquire a
+  dependency on the video PLL. Board-specific parent assignments must
+  preserve any firmware-established supply waveform during handover.
+  Primary SC2 waveforms use counter-minus-one encoding outside constant
+  mode. Hardware state with secondary counters or blinking enabled cannot
+  be represented as a single primary waveform; consumers must not treat
+  it as an ordinary fixed-duty regulator or clock state.
+
 properties:
   compatible:
     oneOf:
@@ -41,6 +53,7 @@ properties:
           - enum:
               - amlogic,c3-pwm
               - amlogic,meson-a1-pwm
+              - amlogic,meson-sc2-pwm
           - const: amlogic,meson-s4-pwm
       - items:
           - enum:

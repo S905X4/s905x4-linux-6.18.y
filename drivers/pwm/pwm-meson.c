@@ -63,6 +63,13 @@
 #define MISC_B_EN		BIT(1)
 #define MISC_A_EN		BIT(0)
 
+/* SC2 also has secondary counters and blink controls left by firmware. */
+#define MISC_A2_EN		BIT(25)
+#define MISC_B2_EN		BIT(24)
+#define REG_BLINK_AB		0x1c
+#define BLINK_A_EN		BIT(8)
+#define BLINK_B_EN		BIT(9)
+
 #define MESON_NUM_PWMS		2
 #define MESON_NUM_MUX_PARENTS	4
 
@@ -113,6 +120,7 @@ struct meson_pwm_data {
 	int (*channels_init)(struct pwm_chip *chip);
 	bool has_constant;
 	bool has_polarity;
+	bool has_secondary;
 };
 
 struct meson_pwm {
@@ -221,7 +229,7 @@ static int meson_pwm_calc(struct pwm_chip *chip, struct pwm_device *pwm,
 	return 0;
 }
 
-static void meson_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm)
+static int meson_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm)
 {
 	struct meson_pwm *meson = to_meson_pwm(chip);
 	struct meson_pwm_channel *channel = &meson->channels[pwm->hwpwm];
@@ -234,7 +242,10 @@ static void meson_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm)
 
 	err = clk_set_rate(channel->clk, channel->rate);
 	if (err)
-		dev_err(pwmchip_parent(chip), "setting clock rate failed\n");
+		return err;
+	if (meson->data->has_secondary &&
+	    clk_get_rate(channel->clk) != channel->rate)
+		return -EIO;
 
 	spin_lock_irqsave(&meson->lock, flags);
 
@@ -243,6 +254,13 @@ static void meson_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm)
 	writel(value, meson->base + channel_data->reg_offset);
 
 	value = readl(meson->base + REG_MISC_AB);
+	if (meson->data->has_secondary) {
+		u32 blink = readl(meson->base + REG_BLINK_AB);
+
+		value &= ~(pwm->hwpwm ? MISC_B2_EN : MISC_A2_EN);
+		blink &= ~(pwm->hwpwm ? BLINK_B_EN : BLINK_A_EN);
+		writel(blink, meson->base + REG_BLINK_AB);
+	}
 	value |= channel_data->pwm_en_mask;
 
 	if (meson->data->has_constant) {
@@ -260,6 +278,8 @@ static void meson_pwm_enable(struct pwm_chip *chip, struct pwm_device *pwm)
 	writel(value, meson->base + REG_MISC_AB);
 
 	spin_unlock_irqrestore(&meson->lock, flags);
+
+	return 0;
 }
 
 static void meson_pwm_disable(struct pwm_chip *chip, struct pwm_device *pwm)
@@ -276,6 +296,13 @@ static void meson_pwm_disable(struct pwm_chip *chip, struct pwm_device *pwm)
 
 	value = readl(meson->base + REG_MISC_AB);
 	value &= ~channel_data->pwm_en_mask;
+	if (meson->data->has_secondary) {
+		u32 blink = readl(meson->base + REG_BLINK_AB);
+
+		value &= ~(pwm->hwpwm ? MISC_B2_EN : MISC_A2_EN);
+		blink &= ~(pwm->hwpwm ? BLINK_B_EN : BLINK_A_EN);
+		writel(blink, meson->base + REG_BLINK_AB);
+	}
 
 	if (meson->data->has_polarity) {
 		value &= ~channel_data->inv_en_mask;
@@ -316,7 +343,7 @@ static int meson_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 			channel->lo = 0;
 			channel->constant = true;
 
-			meson_pwm_enable(chip, pwm);
+			return meson_pwm_enable(chip, pwm);
 		} else {
 			meson_pwm_disable(chip, pwm);
 		}
@@ -325,7 +352,7 @@ static int meson_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
 		if (err < 0)
 			return err;
 
-		meson_pwm_enable(chip, pwm);
+		return meson_pwm_enable(chip, pwm);
 	}
 
 	return 0;
@@ -371,6 +398,174 @@ static const struct pwm_ops meson_pwm_ops = {
 	.free = meson_pwm_free,
 	.apply = meson_pwm_apply,
 	.get_state = meson_pwm_get_state,
+};
+
+/* Compact hardware representation; no clock objects are copied by queries. */
+struct meson_pwm_wfhw {
+	u32 rate;
+	u32 hi;
+	u32 lo;
+	bool enabled;
+	bool constant;
+	bool inverted;
+};
+
+static int meson_sc2_pwm_round_fromhw(struct pwm_chip *chip,
+				    struct pwm_device *pwm, const void *wfhw,
+				    struct pwm_waveform *wf)
+{
+	const struct meson_pwm_wfhw *hw = wfhw;
+	u32 hi = hw->hi, lo = hw->lo;
+	u64 high_ns;
+
+	*wf = (struct pwm_waveform) {};
+	if (!hw->enabled)
+		return 0;
+	if (!hw->rate)
+		return -EINVAL;
+	if (hw->constant && hi && lo)
+		return -EOPNOTSUPP;
+	if (!hw->constant) {
+		hi++;
+		lo++;
+	}
+	if (!hi && !lo)
+		return -EINVAL;
+	/* Ceiling makes a reported waveform round back to the same counters. */
+	wf->period_length_ns = DIV_ROUND_UP_ULL(NSEC_PER_SEC * (u64)(hi + lo),
+					      hw->rate);
+	if (hw->constant) {
+		if (!!hi != hw->inverted)
+			wf->duty_length_ns = wf->period_length_ns;
+		return 0;
+	}
+	high_ns = DIV_ROUND_UP_ULL(NSEC_PER_SEC * (u64)hi, hw->rate);
+	if (hw->inverted) {
+		wf->duty_length_ns = wf->period_length_ns - high_ns;
+		wf->duty_offset_ns = high_ns;
+	} else {
+		wf->duty_length_ns = high_ns;
+	}
+	return 0;
+}
+
+static int meson_sc2_pwm_round_tohw(struct pwm_chip *chip,
+				  struct pwm_device *pwm,
+				  const struct pwm_waveform *wf, void *wfhw)
+{
+	struct meson_pwm *meson = to_meson_pwm(chip);
+	struct meson_pwm_wfhw *hw = wfhw;
+	struct pwm_waveform rounded;
+	u64 freq, count, high;
+	long rate;
+	int ret;
+
+	*hw = (struct meson_pwm_wfhw) {};
+	if (!wf->period_length_ns)
+		return 0;
+	freq = div64_u64(NSEC_PER_SEC * 0xffffULL, wf->period_length_ns);
+	rate = clk_round_rate(meson->channels[pwm->hwpwm].clk,
+			      min_t(u64, freq, ULONG_MAX));
+	if (rate <= 0)
+		return rate ? rate : -EINVAL;
+	if (rate > U32_MAX)
+		return -ERANGE;
+	count = mul_u64_u64_div_u64(rate, wf->period_length_ns, NSEC_PER_SEC);
+	if (count > 0x20000)
+		return -ERANGE;
+	if (!count)
+		count = 1;
+	hw->rate = rate;
+	hw->enabled = true;
+	/* The hardware can place the high pulse at the start or end only. */
+	hw->inverted = wf->duty_offset_ns &&
+		wf->duty_offset_ns == wf->period_length_ns - wf->duty_length_ns;
+	if (wf->duty_length_ns == wf->period_length_ns)
+		high = count;
+	else
+		high = min(mul_u64_u64_div_u64(rate, wf->duty_length_ns,
+					     NSEC_PER_SEC), count);
+	if (hw->inverted)
+		high = count - high;
+	hw->constant = !high || high == count;
+	if (hw->constant ? count > 0xffff :
+	    high > 0x10000 || count - high > 0x10000)
+		return -ERANGE;
+	hw->hi = high;
+	hw->lo = count - high;
+	if (!hw->constant) {
+		hw->hi--;
+		hw->lo--;
+	}
+	ret = meson_sc2_pwm_round_fromhw(chip, pwm, hw, &rounded);
+	if (ret)
+		return ret;
+	if (rounded.period_length_ns != wf->period_length_ns)
+		return rounded.period_length_ns > wf->period_length_ns;
+	if (rounded.duty_length_ns != wf->duty_length_ns)
+		return rounded.duty_length_ns > wf->duty_length_ns;
+	return rounded.duty_offset_ns > wf->duty_offset_ns;
+}
+
+static int meson_sc2_pwm_read_waveform(struct pwm_chip *chip,
+				     struct pwm_device *pwm, void *wfhw)
+{
+	struct meson_pwm *meson = to_meson_pwm(chip);
+	struct meson_pwm_wfhw *hw = wfhw;
+	struct meson_pwm_channel_data *data = &meson_pwm_per_channel_data[pwm->hwpwm];
+	unsigned long flags;
+	unsigned long rate;
+	u32 misc, value, blink;
+
+	*hw = (struct meson_pwm_wfhw) {};
+	rate = clk_get_rate(meson->channels[pwm->hwpwm].clk);
+	if (rate > U32_MAX)
+		return -ERANGE;
+	hw->rate = rate;
+	spin_lock_irqsave(&meson->lock, flags);
+	misc = readl(meson->base + REG_MISC_AB);
+	blink = readl(meson->base + REG_BLINK_AB);
+	value = readl(meson->base + data->reg_offset);
+	spin_unlock_irqrestore(&meson->lock, flags);
+	/* Do not misidentify a firmware fractional/blinking rail waveform. */
+	if ((misc & (pwm->hwpwm ? MISC_B2_EN : MISC_A2_EN)) ||
+	    (blink & (pwm->hwpwm ? BLINK_B_EN : BLINK_A_EN)))
+		return -EOPNOTSUPP;
+	hw->enabled = misc & data->pwm_en_mask;
+	hw->constant = misc & data->const_en_mask;
+	hw->inverted = misc & data->inv_en_mask;
+	hw->hi = FIELD_GET(PWM_HIGH_MASK, value);
+	hw->lo = FIELD_GET(PWM_LOW_MASK, value);
+	return 0;
+}
+
+static int meson_sc2_pwm_write_waveform(struct pwm_chip *chip,
+				      struct pwm_device *pwm, const void *wfhw)
+{
+	struct meson_pwm *meson = to_meson_pwm(chip);
+	struct meson_pwm_channel *channel = &meson->channels[pwm->hwpwm];
+	const struct meson_pwm_wfhw *hw = wfhw;
+
+	channel->inverted = hw->inverted;
+	if (!hw->enabled) {
+		meson_pwm_disable(chip, pwm);
+		return 0;
+	}
+	channel->rate = hw->rate;
+	channel->hi = hw->hi;
+	channel->lo = hw->lo;
+	channel->constant = hw->constant;
+	return meson_pwm_enable(chip, pwm);
+}
+
+static const struct pwm_ops meson_sc2_pwm_ops = {
+	.request = meson_pwm_request,
+	.free = meson_pwm_free,
+	.sizeof_wfhw = sizeof(struct meson_pwm_wfhw),
+	.round_waveform_tohw = meson_sc2_pwm_round_tohw,
+	.round_waveform_fromhw = meson_sc2_pwm_round_fromhw,
+	.read_waveform = meson_sc2_pwm_read_waveform,
+	.write_waveform = meson_sc2_pwm_write_waveform,
 };
 
 static int meson_pwm_init_clocks_meson8b(struct pwm_chip *chip,
@@ -592,7 +787,18 @@ static const struct meson_pwm_data pwm_s4_data = {
 	.has_polarity = true,
 };
 
+static const struct meson_pwm_data pwm_sc2_data = {
+	.channels_init = meson_pwm_init_channels_s4,
+	.has_constant = true,
+	.has_polarity = true,
+	.has_secondary = true,
+};
+
 static const struct of_device_id meson_pwm_matches[] = {
+	{
+		.compatible = "amlogic,meson-sc2-pwm",
+		.data = &pwm_sc2_data
+	},
 	{
 		.compatible = "amlogic,meson8-pwm-v2",
 		.data = &pwm_meson8_v2_data
@@ -662,9 +868,9 @@ static int meson_pwm_probe(struct platform_device *pdev)
 		return PTR_ERR(meson->base);
 
 	spin_lock_init(&meson->lock);
-	chip->ops = &meson_pwm_ops;
 
 	meson->data = of_device_get_match_data(&pdev->dev);
+	chip->ops = meson->data->has_secondary ? &meson_sc2_pwm_ops : &meson_pwm_ops;
 
 	err = meson->data->channels_init(chip);
 	if (err < 0)
