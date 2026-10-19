@@ -19,6 +19,7 @@ properties:
           - enum:
               - allwinner,sun50i-h616-mali
               - amlogic,meson-g12a-mali
+              - amlogic,meson-sc2-mali
               - mediatek,mt8183-mali
               - mediatek,mt8183b-mali
               - mediatek,mt8186-mali
@@ -140,6 +141,21 @@ allOf:
         power-domains:
           maxItems: 1
         power-domain-names: false
+      required:
+        - resets
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: amlogic,meson-sc2-mali
+    then:
+      properties:
+        clocks:
+          maxItems: 1
+        resets:
+          minItems: 2
+          maxItems: 2
+        power-domains: false
       required:
         - resets
   - if:
