@@ -439,13 +439,12 @@ static int meson_sc2_pwm_round_fromhw(struct pwm_chip *chip,
 			wf->duty_length_ns = wf->period_length_ns;
 		return 0;
 	}
-	high_ns = DIV_ROUND_UP_ULL(NSEC_PER_SEC * (u64)hi, hw->rate);
-	if (hw->inverted) {
-		wf->duty_length_ns = wf->period_length_ns - high_ns;
-		wf->duty_offset_ns = high_ns;
-	} else {
-		wf->duty_length_ns = high_ns;
-	}
+	/* Round physical high time directly, including inverted pulses. */
+	high_ns = DIV_ROUND_UP_ULL(NSEC_PER_SEC *
+				   (u64)(hw->inverted ? lo : hi), hw->rate);
+	wf->duty_length_ns = high_ns;
+	if (hw->inverted)
+		wf->duty_offset_ns = wf->period_length_ns - high_ns;
 	return 0;
 }
 
@@ -480,15 +479,13 @@ static int meson_sc2_pwm_round_tohw(struct pwm_chip *chip,
 	/* The hardware can place the high pulse at the start or end only. */
 	hw->inverted = wf->duty_offset_ns &&
 		wf->duty_offset_ns == wf->period_length_ns - wf->duty_length_ns;
-	/* Quantize the leading edge, not a difference of rounded widths. */
-	if (hw->inverted)
-		high = min(mul_u64_u64_div_u64(rate, wf->duty_offset_ns,
-					     NSEC_PER_SEC), count);
-	else if (wf->duty_length_ns == wf->period_length_ns)
+	if (wf->duty_length_ns == wf->period_length_ns)
 		high = count;
 	else
 		high = min(mul_u64_u64_div_u64(rate, wf->duty_length_ns,
 					     NSEC_PER_SEC), count);
+	if (hw->inverted)
+		high = count - high;
 	hw->constant = !high || high == count;
 	if (hw->constant ? count > 0xffff :
 	    high > 0x10000 || count - high > 0x10000)
