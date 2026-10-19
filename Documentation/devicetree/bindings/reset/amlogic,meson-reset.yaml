@@ -25,6 +25,7 @@ properties:
           - enum:
               - amlogic,a4-reset
               - amlogic,a5-reset
+              - amlogic,meson-sc2-reset
           - const: amlogic,meson-s4-reset
 
   reg:

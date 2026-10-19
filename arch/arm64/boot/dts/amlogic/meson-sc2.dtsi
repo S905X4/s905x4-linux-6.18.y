@@ -16,6 +16,7 @@
 #include <dt-bindings/reset/amlogic,meson-sc2-reset.h>
 #include <dt-bindings/reset/amlogic,meson-axg-audio-arb.h>
 #include <dt-bindings/reset/amlogic,meson-g12a-audio-reset.h>
+#include <dt-bindings/thermal/thermal.h>
 
 / {
 	compatible = "amlogic,sc2";
@@ -153,7 +154,7 @@
 			};
 
 			reset: reset-controller@2000 {
-				compatible = "amlogic,meson-s4-reset";
+				compatible = "amlogic,meson-sc2-reset", "amlogic,meson-s4-reset";
 				reg = <0 0x2000 0 0x98>;
 				#reset-cells = <1>;
 			};
@@ -202,6 +203,22 @@
 				};
 			};
 
+			pwm_ef: pwm@5c000 {
+				compatible = "amlogic,meson-sc2-pwm", "amlogic,meson-s4-pwm";
+				reg = <0 0x5c000 0 0x24>;
+				clocks = <&clkc CLKID_PWM_E_GATE>, <&clkc CLKID_PWM_F_GATE>;
+				#pwm-cells = <3>;
+				status = "disabled";
+			};
+
+			pwm_ij: pwm@60000 {
+				compatible = "amlogic,meson-sc2-pwm", "amlogic,meson-s4-pwm";
+				reg = <0 0x60000 0 0x24>;
+				clocks = <&clkc CLKID_PWM_I_GATE>, <&clkc CLKID_PWM_J_GATE>;
+				#pwm-cells = <3>;
+				status = "disabled";
+			};
+
 			uart_b: serial@7a000 {
 				compatible = "amlogic,meson-g12a-uart",
 					     "amlogic,meson-gx-uart",
@@ -212,6 +229,65 @@
 				clock-names = "xtal", "pclk", "baud";
 				status = "disabled";
 			};
+
+			uart_e: serial@80000 {
+				compatible = "amlogic,meson-g12a-uart", "amlogic,meson-gx-uart";
+				reg = <0 0x80000 0 0x18>;
+				interrupts = <GIC_SPI 172 IRQ_TYPE_EDGE_RISING>;
+				clocks = <&xtal>, <&clkc CLKID_UART_E>, <&xtal>;
+				clock-names = "xtal", "pclk", "baud";
+				fifo-size = <64>;
+				status = "disabled";
+			};
+		};
+
+		gpu: gpu@fe400000 {
+			compatible = "amlogic,meson-sc2-mali", "arm,mali-bifrost";
+			reg = <0 0xfe400000 0 0x4000>;
+			interrupts = <GIC_SPI 146 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 145 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 144 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "job", "mmu", "gpu";
+			clocks = <&clkc CLKID_MALI>;
+			resets = <&reset RESET_MALI>, <&reset RESET_MALI_APB>;
+			assigned-clocks = <&clkc CLKID_MALI_0_SEL>,
+					  <&clkc CLKID_MALI_0>, <&clkc CLKID_MALI>;
+			assigned-clock-parents = <&clkc CLKID_FCLK_DIV2P5>,
+						 <0>, <&clkc CLKID_MALI_0>;
+			assigned-clock-rates = <0>, <800000000>, <0>;
+			status = "disabled";
+		};
+
+		cec: cec@fe044000 {
+			compatible = "amlogic,meson-sc2-ao-cec";
+			reg = <0 0xfe044000 0 0x54>;
+			interrupts = <GIC_SPI 180 IRQ_TYPE_EDGE_RISING>;
+			clocks = <&clkc CLKID_CECB_32K_CLKOUT>;
+			clock-names = "core";
+			assigned-clocks = <&clkc CLKID_CECB_32K_SEL_PRE>,
+					  <&clkc CLKID_CECB_32K_SEL>,
+					  <&clkc CLKID_CECB_32K_CLKOUT>;
+			assigned-clock-parents = <&clkc CLKID_CECB_32K_DIV>,
+						 <&clkc CLKID_CECB_32K_SEL_PRE>, <0>;
+			assigned-clock-rates = <0>, <0>, <32768>;
+			hdmi-phandle = <&hdmi_tx>;
+			status = "disabled";
+		};
+
+		cpu_temp: temperature-sensor@fe020000 {
+			compatible = "amlogic,sc2-cpu-thermal";
+			reg = <0 0xfe020000 0 0x50>, <0 0xfe010328 0 4>;
+			interrupts = <GIC_SPI 30 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clkc CLKID_TS_CLK_GATE>;
+			#thermal-sensor-cells = <0>;
+		};
+
+		ddr_temp: temperature-sensor@fe022000 {
+			compatible = "amlogic,sc2-ddr-thermal";
+			reg = <0 0xfe022000 0 0x50>, <0 0xfe010370 0 4>;
+			interrupts = <GIC_SPI 31 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clkc CLKID_TS_CLK_GATE>;
+			#thermal-sensor-cells = <0>;
 		};
 
 		canvas: video-lut@fe036048 {
@@ -384,6 +460,19 @@
 			status = "disabled";
 		};
 
+		sd_emmc_a: mmc@fe088000 {
+			compatible = "amlogic,meson-axg-mmc";
+			reg = <0 0xfe088000 0 0x800>;
+			interrupts = <GIC_SPI 176 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&clkc CLKID_SD_EMMC_A>, <&xtal>,
+				 <&clkc CLKID_FCLK_DIV2>;
+			clock-names = "core", "clkin0", "clkin1";
+			resets = <&reset RESET_SD_EMMC_A>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
 		sd_emmc_b: mmc@fe08a000 {
 			compatible = "amlogic,meson-axg-mmc";
 			reg = <0 0xfe08a000 0 0x800>;
@@ -400,7 +489,6 @@
 			status = "disabled";
 		};
 
-		/* Deliberately disabled: the original eMMC firmware is not a target. */
 		sd_emmc_c: mmc@fe08c000 {
 			compatible = "amlogic,meson-axg-mmc";
 			reg = <0 0xfe08c000 0 0x800>;
@@ -408,6 +496,11 @@
 			clocks = <&clkc CLKID_NAND>,
 				 <&clkc CLKID_SD_EMMC_C_CLK>, <&clkc CLKID_FCLK_DIV2>;
 			clock-names = "core", "clkin0", "clkin1";
+			assigned-clocks = <&clkc CLKID_SD_EMMC_C_CLK_MUX>,
+					  <&clkc CLKID_SD_EMMC_C_CLK>;
+			assigned-clock-parents = <&xtal>;
+			assigned-clock-rates = <0>, <24000000>;
+			resets = <&reset RESET_NAND_EMMC>;
 			status = "disabled";
 		};
 
@@ -531,6 +624,85 @@
 				 "sdcard_d3_c", "sdcard_cmd_c", "sdcard_clk_c";
 			function = "sdcard";
 			bias-pull-up;
+			drive-strength-microamp = <4000>;
+		};
+
+		cd {
+			groups = "GPIOC_6";
+			function = "gpio_periphs";
+			bias-pull-up;
+			input-enable;
+		};
+	};
+
+	sdcard_clk_gate_pins: sdcard-clk-gate-pins {
+		mux {
+			groups = "GPIOC_4";
+			function = "gpio_periphs";
+			bias-pull-down;
+			drive-strength-microamp = <4000>;
+		};
+	};
+
+	emmc_pins: emmc-pins {
+		data-cmd {
+			groups = "emmc_nand_d0", "emmc_nand_d1", "emmc_nand_d2",
+				 "emmc_nand_d3", "emmc_nand_d4", "emmc_nand_d5",
+				 "emmc_nand_d6", "emmc_nand_d7", "emmc_cmd";
+			function = "emmc";
+			bias-pull-up;
+			drive-strength-microamp = <4000>;
+		};
+
+		clk {
+			groups = "emmc_clk";
+			function = "emmc";
+			bias-disable;
+			drive-strength-microamp = <4000>;
+		};
+	};
+
+	emmc_clk_gate_pins: emmc-clk-gate-pins {
+		mux {
+			groups = "GPIOB_8";
+			function = "gpio_periphs";
+			bias-pull-down;
+			drive-strength-microamp = <4000>;
+		};
+	};
+
+	cec_b_h_pins: cec-b-h-pins {
+		mux {
+			groups = "cec_b_h";
+			function = "cec_b";
+			bias-disable;
+		};
+	};
+
+	sdio_pins: sdio-pins {
+		mux {
+			groups = "sdio_d0_x", "sdio_d1_x", "sdio_d2_x", "sdio_d3_x",
+				 "sdio_clk_x", "sdio_cmd_x";
+			function = "sdio";
+			bias-disable;
+			drive-strength-microamp = <4000>;
+		};
+	};
+
+	uart_e_pins: uart-e-pins {
+		mux {
+			groups = "uart_e_tx", "uart_e_rx", "uart_e_cts", "uart_e_rts";
+			function = "uart_e";
+			bias-pull-up;
+		};
+	};
+
+	pwm_e_pins: pwm-e-pins {
+		mux {
+			groups = "pwm_e";
+			function = "pwm_e";
+			bias-disable;
+			drive-strength-microamp = <500>;
 		};
 	};
 
