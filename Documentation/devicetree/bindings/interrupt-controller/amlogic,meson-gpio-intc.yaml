@@ -35,6 +35,7 @@ properties:
               - amlogic,meson-sm1-gpio-intc
               - amlogic,meson-a1-gpio-intc
               - amlogic,meson-s4-gpio-intc
+              - amlogic,meson-sc2-gpio-intc
               - amlogic,a4-gpio-intc
               - amlogic,a4-gpio-ao-intc
               - amlogic,a5-gpio-intc
@@ -49,6 +50,9 @@ properties:
 
   "#interrupt-cells":
     const: 2
+
+  "#address-cells":
+    const: 0
 
   amlogic,channel-interrupts:
     description: Array with the upstream hwirq numbers

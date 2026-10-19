@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/pinctrl/amlogic,meson-pinctrl-sc2-periphs.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Amlogic SC2 peripheral pin controller
+
+maintainers:
+  - Heiner Kallweit <hkallweit1@gmail.com>
+
+description: |
+  SC2 integrates direction, pull enable, pull selection and drive strength
+  registers into each GPIO bank. Its pin mux register window is separate.
+
+allOf:
+  - $ref: amlogic,meson-pinctrl-common.yaml#
+
+properties:
+  compatible:
+    const: amlogic,meson-sc2-periphs-pinctrl
+
+required:
+  - compatible
+
+patternProperties:
+  "^bank@[0-9a-f]+$":
+    $ref: amlogic,meson-pinctrl-common.yaml#/$defs/meson-gpio
+    unevaluatedProperties: false
+    properties:
+      reg:
+        maxItems: 2
+      reg-names:
+        items:
+          - const: mux
+          - const: gpio
+      gpio-line-names:
+        maxItems: 87
+
+unevaluatedProperties:
+  type: object
+  $ref: amlogic,meson-pinctrl-common.yaml#/$defs/meson-pins
