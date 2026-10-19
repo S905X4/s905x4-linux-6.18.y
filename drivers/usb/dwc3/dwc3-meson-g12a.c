@@ -343,6 +343,7 @@ static int dwc3_meson_g12a_usb2_init(struct dwc3_meson_g12a *priv,
 static void dwc3_meson_g12a_usb3_init(struct dwc3_meson_g12a *priv)
 {
 	regmap_update_bits(priv->usb_glue_regmap, USB_R3,
+			USB_R3_P30_SSC_ENABLE |
 			USB_R3_P30_SSC_RANGE_MASK |
 			USB_R3_P30_REF_SSP_EN,
 			USB_R3_P30_SSC_ENABLE |

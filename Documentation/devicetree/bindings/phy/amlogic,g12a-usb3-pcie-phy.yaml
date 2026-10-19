@@ -14,16 +14,20 @@ properties:
   compatible:
     enum:
       - amlogic,g12a-usb3-pcie-phy
+      - amlogic,sc2-usb3-pcie-phy
 
   reg:
     maxItems: 1
 
   clocks:
-    maxItems: 1
+    minItems: 1
+    maxItems: 2
 
   clock-names:
+    minItems: 1
     items:
       - const: ref_clk
+      - const: bgp
 
   resets:
     maxItems: 1
@@ -48,6 +52,24 @@ required:
   - resets
   - reset-names
   - "#phy-cells"
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          const: amlogic,sc2-usb3-pcie-phy
+    then:
+      properties:
+        clocks:
+          minItems: 2
+        clock-names:
+          minItems: 2
+    else:
+      properties:
+        clocks:
+          maxItems: 1
+        clock-names:
+          maxItems: 1
 
 additionalProperties: false
 

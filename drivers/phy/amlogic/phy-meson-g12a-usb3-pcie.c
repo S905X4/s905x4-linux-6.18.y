@@ -52,6 +52,11 @@
 
 #define PCIE_RESET_DELAY					500
 
+enum phy_g12a_usb3_pcie_soc_id {
+	MESON_USB3_PCIE_G12A,
+	MESON_USB3_PCIE_SC2,
+};
+
 struct phy_g12a_usb3_pcie_priv {
 	struct regmap		*regmap;
 	struct regmap		*regmap_cr;
@@ -59,6 +64,7 @@ struct phy_g12a_usb3_pcie_priv {
 	struct reset_control	*reset;
 	struct phy		*phy;
 	unsigned int		mode;
+	enum phy_g12a_usb3_pcie_soc_id soc_id;
 };
 
 static const struct regmap_config phy_g12a_usb3_pcie_regmap_conf = {
@@ -208,6 +214,12 @@ static int phy_g12a_usb3_init(struct phy *phy)
 			   PHY_R0_PCIE_USB3_SWITCH,
 			   PHY_R0_PCIE_USB3_SWITCH);
 
+	/* SC2 must leave the low-power state before accessing the CR bus. */
+	if (priv->soc_id == MESON_USB3_PCIE_SC2)
+		regmap_update_bits(priv->regmap, PHY_R0,
+				   PHY_R0_PCIE_POWER_STATE,
+				   FIELD_PREP(PHY_R0_PCIE_POWER_STATE, 0x1c));
+
 	/*
 	 * WORKAROUND: There is SSPHY suspend bug due to
 	 * which USB enumerates
@@ -219,7 +231,8 @@ static int phy_g12a_usb3_init(struct phy *phy)
 	if (ret)
 		return ret;
 
-	ret = regmap_update_bits(priv->regmap_cr, 0x1010, 0xff0, 20);
+	ret = regmap_update_bits(priv->regmap_cr, 0x1010, 0xff0,
+				 priv->soc_id == MESON_USB3_PCIE_SC2 ? 0x20 : 20);
 	if (ret)
 		return ret;
 
@@ -282,7 +295,8 @@ static int phy_g12a_usb3_pcie_power_on(struct phy *phy)
 {
 	struct phy_g12a_usb3_pcie_priv *priv = phy_get_drvdata(phy);
 
-	if (priv->mode == PHY_TYPE_USB3)
+	if (priv->mode == PHY_TYPE_USB3 &&
+	    priv->soc_id != MESON_USB3_PCIE_SC2)
 		return 0;
 
 	regmap_update_bits(priv->regmap, PHY_R0,
@@ -296,7 +310,8 @@ static int phy_g12a_usb3_pcie_power_off(struct phy *phy)
 {
 	struct phy_g12a_usb3_pcie_priv *priv = phy_get_drvdata(phy);
 
-	if (priv->mode == PHY_TYPE_USB3)
+	if (priv->mode == PHY_TYPE_USB3 &&
+	    priv->soc_id != MESON_USB3_PCIE_SC2)
 		return 0;
 
 	regmap_update_bits(priv->regmap, PHY_R0,
@@ -387,11 +402,14 @@ static int phy_g12a_usb3_pcie_probe(struct platform_device *pdev)
 	struct device_node *np = dev->of_node;
 	struct phy_g12a_usb3_pcie_priv *priv;
 	struct phy_provider *phy_provider;
+	struct clk *clk_bgp;
 	void __iomem *base;
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
+
+	priv->soc_id = (uintptr_t)of_device_get_match_data(dev);
 
 	base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(base))
@@ -411,6 +429,13 @@ static int phy_g12a_usb3_pcie_probe(struct platform_device *pdev)
 	if (IS_ERR(priv->clk_ref))
 		return PTR_ERR(priv->clk_ref);
 
+	/* SC2 has a separately gated analog bandgap reference. */
+	if (priv->soc_id == MESON_USB3_PCIE_SC2) {
+		clk_bgp = devm_clk_get_enabled(dev, "bgp");
+		if (IS_ERR(clk_bgp))
+			return PTR_ERR(clk_bgp);
+	}
+
 	priv->reset = devm_reset_control_array_get_exclusive(dev);
 	if (IS_ERR(priv->reset))
 		return PTR_ERR(priv->reset);
@@ -428,7 +453,14 @@ static int phy_g12a_usb3_pcie_probe(struct platform_device *pdev)
 }
 
 static const struct of_device_id phy_g12a_usb3_pcie_of_match[] = {
-	{ .compatible = "amlogic,g12a-usb3-pcie-phy", },
+	{
+		.compatible = "amlogic,g12a-usb3-pcie-phy",
+		.data = (void *)MESON_USB3_PCIE_G12A,
+	},
+	{
+		.compatible = "amlogic,sc2-usb3-pcie-phy",
+		.data = (void *)MESON_USB3_PCIE_SC2,
+	},
 	{ },
 };
 MODULE_DEVICE_TABLE(of, phy_g12a_usb3_pcie_of_match);

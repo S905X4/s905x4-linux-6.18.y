@@ -50,25 +50,25 @@ config PHY_MESON_G12A_MIPI_DPHY_ANALOG
 	  If unsure, say N.
 
 config PHY_MESON_G12A_USB2
-	tristate "Meson G12A USB2 PHY driver"
+	tristate "Meson G12A, A1 and SC2 USB2 PHY driver"
 	default ARCH_MESON
 	depends on OF && (ARCH_MESON || COMPILE_TEST)
 	select GENERIC_PHY
 	select REGMAP_MMIO
 	help
 	  Enable this to support the Meson USB2 PHYs found in Meson
-	  G12A SoCs.
+	  G12A, A1 and SC2 SoCs.
 	  If unsure, say N.
 
 config PHY_MESON_G12A_USB3_PCIE
-	tristate "Meson G12A USB3+PCIE Combo PHY driver"
+	tristate "Meson G12A and SC2 USB3+PCIE Combo PHY driver"
 	default ARCH_MESON
 	depends on OF && (ARCH_MESON || COMPILE_TEST)
 	select GENERIC_PHY
 	select REGMAP_MMIO
 	help
 	  Enable this to support the Meson USB3 + PCIE Combo PHY found
-	  in Meson G12A SoCs.
+	  in Meson G12A and SC2 SoCs.
 	  If unsure, say N.
 
 config PHY_MESON_AXG_PCIE

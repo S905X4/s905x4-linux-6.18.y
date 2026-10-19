@@ -149,6 +149,7 @@
 enum meson_soc_id {
 	MESON_SOC_G12A  = 0,
 	MESON_SOC_A1,
+	MESON_SOC_SC2,
 };
 
 struct phy_meson_g12a_usb2_priv {
@@ -217,7 +218,7 @@ static int phy_meson_g12a_usb2_init(struct phy *phy)
 		FIELD_PREP(PHY_CTRL_R18_MPLL_ADJ_LDO, 1) |
 		PHY_CTRL_R18_MPLL_ACG_RANGE;
 
-	if (priv->soc_id == MESON_SOC_A1)
+	if (priv->soc_id == MESON_SOC_A1 || priv->soc_id == MESON_SOC_SC2)
 		value |= PHY_CTRL_R18_MPLL_DCO_CLK_SEL;
 
 	regmap_write(priv->regmap, PHY_CTRL_R18, value);
@@ -252,7 +253,30 @@ static int phy_meson_g12a_usb2_init(struct phy *phy)
 			     PHY_CTRL_R4_TEST_BYPASS_MODE_EN |
 			     FIELD_PREP(PHY_CTRL_R4_I_C2L_BIAS_TRIM_1_0, 0) |
 			     FIELD_PREP(PHY_CTRL_R4_I_C2L_BIAS_TRIM_3_2, 0));
-	else if (priv->soc_id == MESON_SOC_A1) {
+	else if (priv->soc_id == MESON_SOC_SC2) {
+		regmap_write(priv->regmap, PHY_CTRL_R21,
+			     PHY_CTRL_R21_USB2_CAL_ACK_EN |
+			     PHY_CTRL_R21_USB2_TX_STRG_PD |
+			     FIELD_PREP(PHY_CTRL_R21_USB2_OTG_ACA_TRIM_1_0, 2));
+
+		/* SC2 stores the factory calibration in R2, not in R4. */
+		regmap_read(priv->regmap, PHY_CTRL_R2, &value);
+		value &= GENMASK(11, 0);
+		if (!value)
+			value = PHY_CTRL_R4_TEST_BYPASS_MODE_EN | 0x1f;
+		regmap_update_bits(priv->regmap, PHY_CTRL_R4, value, value);
+
+		/* The version-2 PHY uses a different disconnect threshold. */
+		regmap_write(priv->regmap, PHY_CTRL_R3, 0x3f);
+		regmap_update_bits(priv->regmap, PHY_CTRL_R14,
+				   GENMASK(28, 27), 0);
+		/* Latch the threshold and calibration changes. */
+		regmap_write(priv->regmap, PHY_CTRL_R13,
+			     PHY_CTRL_R13_UPDATE_PMA_SIGNALS |
+			     FIELD_PREP(PHY_CTRL_R13_MIN_COUNT_FOR_SYNC_DET, 7));
+
+		return 0;
+	} else if (priv->soc_id == MESON_SOC_A1) {
 		regmap_write(priv->regmap, PHY_CTRL_R21,
 			     PHY_CTRL_R21_USB2_CAL_ACK_EN |
 			     PHY_CTRL_R21_USB2_TX_STRG_PD |
@@ -359,6 +383,10 @@ static const struct of_device_id phy_meson_g12a_usb2_of_match[] = {
 	{
 		.compatible = "amlogic,a1-usb2-phy",
 		.data = (void *)MESON_SOC_A1,
+	},
+	{
+		.compatible = "amlogic,sc2-usb2-phy",
+		.data = (void *)MESON_SOC_SC2,
 	},
 	{ /* Sentinel */ }
 };

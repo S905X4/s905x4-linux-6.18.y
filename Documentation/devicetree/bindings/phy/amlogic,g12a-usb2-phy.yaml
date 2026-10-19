@@ -10,11 +10,17 @@ title: Amlogic G12A USB2 PHY
 maintainers:
   - Neil Armstrong <neil.armstrong@linaro.org>
 
+description: |
+  G12A-compatible USB2 PHYs use an external 24 MHz crystal and one reset
+  per port. SC2 uses version-2 analog tuning and factory calibration from
+  the PHY register bank, so its compatible must not fall back to G12A.
+
 properties:
   compatible:
     enum:
       - amlogic,g12a-usb2-phy
       - amlogic,a1-usb2-phy
+      - amlogic,sc2-usb2-phy
 
   reg:
     maxItems: 1
