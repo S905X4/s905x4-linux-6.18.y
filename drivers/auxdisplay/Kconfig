@@ -487,6 +487,20 @@ config IMG_ASCII_LCD
 	  development boards such as the MIPS Boston, MIPS Malta & MIPS SEAD3
 	  from Imagination Technologies.
 
+config FD6551
+	tristate "FD6551 seven-segment LED controller"
+	depends on I2C
+	select NEW_LEDS
+	select LEDS_CLASS
+	select LINEDISP
+	help
+	  Support four-digit displays and independent indicator LEDs wired
+	  to the five-grid FD6551 controller, including the HK1 RBOX X4.
+	  Text uses the character line display interface; brightness and
+	  indicators use the LED class. GPIO wiring can use i2c-gpio.
+
+	  This driver can also be built as a module named fd6551.
+
 config HT16K33
 	tristate "Holtek Ht16K33 LED controller with keyscan"
 	depends on FB && I2C && INPUT && BACKLIGHT_CLASS_DEVICE

@@ -1,0 +1,110 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/auxdisplay/fdhisi,fd6551.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: FD6551 seven-segment LED display controller
+
+maintainers:
+  - hiper25 <whydonit@gmail.com>
+
+description: |
+  FD6551 drives five common-cathode grids of seven segments each with
+  eight brightness settings. Its two-wire MSB-first interface uses the
+  I2C write framing. The control command is at 7-bit address 0x24, and
+  the five grid data commands occupy 0x33 through 0x37. All six addresses
+  must be reserved for this device. An i2c-gpio bus may provide CLK and DAT.
+
+  This binding describes four text digits and individual indicator LEDs
+  on the remaining grid. Segment bits 0 through 6 correspond to the
+  standard seven-segment positions A through G. The FD6551 device manual
+  revision A3 (2021-08-13), section 10 describes the wire protocol.
+
+properties:
+  compatible:
+    const: fdhisi,fd6551
+
+  reg:
+    const: 0x24
+
+  fdhisi,digits:
+    $ref: /schemas/types.yaml#/definitions/uint32-array
+    description: Grid indices for the four text digits, from left to right.
+    minItems: 4
+    maxItems: 4
+    uniqueItems: true
+    items:
+      minimum: 0
+      maximum: 4
+
+  default-brightness-level:
+    description: Initial brightness, zero for off or one through eight for on.
+    minimum: 0
+    maximum: 8
+
+  '#address-cells':
+    const: 1
+
+  '#size-cells':
+    const: 0
+
+  display:
+    $ref: /schemas/leds/common.yaml#
+    description: LED class identity of the display-wide brightness control.
+    unevaluatedProperties: false
+
+patternProperties:
+  '^led@[0-9a-f]+$':
+    type: object
+    $ref: /schemas/leds/common.yaml#
+    unevaluatedProperties: false
+    description: |
+      A single indicator LED. Its index is grid * 7 + segment, where grid
+      is 0 through 4 and segment is 0 through 6. Indicators must not share
+      any of the four text grids or duplicate another indicator index.
+    properties:
+      reg:
+        maxItems: 1
+        items:
+          minimum: 0
+          maximum: 34
+    required:
+      - reg
+
+required:
+  - compatible
+  - reg
+  - fdhisi,digits
+  - default-brightness-level
+  - '#address-cells'
+  - '#size-cells'
+  - display
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/leds/common.h>
+    i2c {
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        display-controller@24 {
+            compatible = "fdhisi,fd6551";
+            reg = <0x24>;
+            fdhisi,digits = <4 3 2 1>;
+            default-brightness-level = <1>;
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            display {
+                function = "display";
+            };
+
+            led@4 {
+                reg = <4>;
+                function = "colon";
+            };
+        };
+    };

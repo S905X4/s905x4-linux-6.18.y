@@ -38,6 +38,63 @@
 		};
 	};
 
+	i2c-panel {
+		compatible = "i2c-gpio";
+		sda-gpios = <&gpio GPIOB_0 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&gpio GPIOB_1 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <5>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		display-controller@24 {
+			compatible = "fdhisi,fd6551";
+			reg = <0x24>;
+			fdhisi,digits = <4 3 2 1>;
+			default-brightness-level = <1>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			display {
+				function = "display";
+			};
+
+			led@0 {
+				reg = <0>;
+				function = "alarm";
+			};
+
+			led@1 {
+				reg = <1>;
+				function = "usb";
+			};
+
+			led@2 {
+				reg = <2>;
+				function = "pause";
+			};
+
+			led@3 {
+				reg = <3>;
+				function = "play";
+			};
+
+			led@4 {
+				reg = <4>;
+				function = "colon";
+			};
+
+			led@5 {
+				reg = <5>;
+				function = "lan";
+			};
+
+			led@6 {
+				reg = <6>;
+				function = "wlan";
+			};
+		};
+	};
+
 	reserved-memory {
 		#address-cells = <2>;
 		#size-cells = <2>;
