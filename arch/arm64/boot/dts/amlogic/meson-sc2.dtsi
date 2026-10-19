@@ -264,11 +264,11 @@
 			interrupts = <GIC_SPI 180 IRQ_TYPE_EDGE_RISING>;
 			clocks = <&clkc CLKID_CECB_32K_CLKOUT>;
 			clock-names = "core";
-			assigned-clocks = <&clkc CLKID_CECB_32K_SEL_PRE>,
-					  <&clkc CLKID_CECB_32K_SEL>,
+			assigned-clocks = <&clkc CLKID_CECB_32K_MUX_PRE>,
+					  <&clkc CLKID_CECB_32K_MUX>,
 					  <&clkc CLKID_CECB_32K_CLKOUT>;
 			assigned-clock-parents = <&clkc CLKID_CECB_32K_DIV>,
-						 <&clkc CLKID_CECB_32K_SEL_PRE>, <0>;
+						 <&clkc CLKID_CECB_32K_MUX_PRE>, <0>;
 			assigned-clock-rates = <0>, <0>, <32768>;
 			hdmi-phandle = <&hdmi_tx>;
 			status = "disabled";
