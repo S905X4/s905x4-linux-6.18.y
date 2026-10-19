@@ -21,6 +21,7 @@ properties:
 
   compatible:
     oneOf:
+      - const: amlogic,sc2-toacodec
       - items:
           - const: amlogic,g12a-toacodec
       - items:

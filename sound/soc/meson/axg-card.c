@@ -291,7 +291,8 @@ static int axg_card_cpu_is_capture_fe(struct device_node *np)
 
 static int axg_card_cpu_is_playback_fe(struct device_node *np)
 {
-	return of_device_is_compatible(np, DT_PREFIX "axg-frddr");
+	return of_device_is_compatible(np, DT_PREFIX "axg-frddr") ||
+		of_device_is_compatible(np, DT_PREFIX "sc2-frddr");
 }
 
 static int axg_card_cpu_is_tdm_iface(struct device_node *np)
@@ -302,7 +303,9 @@ static int axg_card_cpu_is_tdm_iface(struct device_node *np)
 static int axg_card_cpu_is_codec(struct device_node *np)
 {
 	return of_device_is_compatible(np, DT_PREFIX "g12a-tohdmitx") ||
-		of_device_is_compatible(np, DT_PREFIX "g12a-toacodec");
+		of_device_is_compatible(np, DT_PREFIX "g12a-toacodec") ||
+		of_device_is_compatible(np, DT_PREFIX "sc2-tohdmitx") ||
+		of_device_is_compatible(np, DT_PREFIX "sc2-toacodec");
 }
 
 static int axg_card_add_link(struct snd_soc_card *card, struct device_node *np,

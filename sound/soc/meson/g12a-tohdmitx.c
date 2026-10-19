@@ -68,6 +68,12 @@ static int g12a_tohdmitx_i2s_mux_put_enum(struct snd_kcontrol *kcontrol,
 				      FIELD_PREP(CTRL0_I2S_LRCLK_SEL, mux) |
 				      FIELD_PREP(CTRL0_I2S_BCLK_SEL, mux));
 
+	/* As on TOACODEC, interface A/B/C uses master clock A/B/C. */
+	if (of_device_is_compatible(component->dev->of_node,
+				    "amlogic,sc2-tohdmitx"))
+		snd_soc_component_update_bits(component, e->reg, GENMASK(18, 16),
+					      FIELD_PREP(GENMASK(18, 16), mux));
+
 	snd_soc_dapm_mux_update_power(dapm, kcontrol, mux, e, NULL);
 
 	return 1;
@@ -143,6 +149,34 @@ static const struct snd_soc_dapm_widget g12a_tohdmitx_widgets[] = {
 			 &g12a_tohdmitx_spdif_mux),
 	SND_SOC_DAPM_SWITCH("SPDIF OUT EN", SND_SOC_NOPM, 0, 0,
 			    &g12a_tohdmitx_out_enable),
+};
+
+static int sc2_tohdmitx_clock_event(struct snd_soc_dapm_widget *w,
+				  struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *c = snd_soc_dapm_to_component(w->dapm);
+	unsigned int mask = BIT(w->shift - 1);
+	int ret;
+
+	ret = snd_soc_component_update_bits(c, TOHDMITX_CTRL0, mask,
+			SND_SOC_DAPM_EVENT_ON(event) ? mask : 0);
+	return ret < 0 ? ret : 0;
+}
+
+static const struct snd_kcontrol_new sc2_tohdmitx_i2s_enable =
+	SOC_DAPM_SINGLE_AUTODISABLE("Switch", TOHDMITX_CTRL0, 29, 1, 0);
+
+static const struct snd_soc_dapm_widget sc2_tohdmitx_widgets[] = {
+	SND_SOC_DAPM_MUX("I2S SRC", SND_SOC_NOPM, 0, 0,
+			 &g12a_tohdmitx_i2s_mux),
+	SND_SOC_DAPM_SWITCH_E("I2S OUT EN", SND_SOC_NOPM, 29, 0,
+		&sc2_tohdmitx_i2s_enable, sc2_tohdmitx_clock_event,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_MUX("SPDIF SRC", SND_SOC_NOPM, 0, 0,
+			 &g12a_tohdmitx_spdif_mux),
+	SND_SOC_DAPM_SWITCH_E("SPDIF OUT EN", SND_SOC_NOPM, 31, 0,
+		&g12a_tohdmitx_out_enable, sc2_tohdmitx_clock_event,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 };
 
 static const struct snd_soc_dai_ops g12a_tohdmitx_input_ops = {
@@ -234,6 +268,23 @@ static const struct snd_soc_component_driver g12a_tohdmitx_component_drv = {
 	.endianness		= 1,
 };
 
+static int sc2_tohdmi_component_probe(struct snd_soc_component *c)
+{
+	/* Feed the HDMI master clock through its documented divide-by-two. */
+	return snd_soc_component_write(c, TOHDMITX_CTRL0,
+		CTRL0_I2S_BLK_CAP_INV | CTRL0_SPDIF_CLK_CAP_INV |
+		BIT(19) | BIT(20));
+}
+
+static const struct snd_soc_component_driver sc2_tohdmitx_component_drv = {
+	.probe = sc2_tohdmi_component_probe,
+	.dapm_widgets = sc2_tohdmitx_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(sc2_tohdmitx_widgets),
+	.dapm_routes = g12a_tohdmitx_routes,
+	.num_dapm_routes = ARRAY_SIZE(g12a_tohdmitx_routes),
+	.endianness = 1,
+};
+
 static const struct regmap_config g12a_tohdmitx_regmap_cfg = {
 	.reg_bits	= 32,
 	.val_bits	= 32,
@@ -241,7 +292,10 @@ static const struct regmap_config g12a_tohdmitx_regmap_cfg = {
 };
 
 static const struct of_device_id g12a_tohdmitx_of_match[] = {
-	{ .compatible = "amlogic,g12a-tohdmitx", },
+	{ .compatible = "amlogic,g12a-tohdmitx",
+	  .data = &g12a_tohdmitx_component_drv },
+	{ .compatible = "amlogic,sc2-tohdmitx",
+	  .data = &sc2_tohdmitx_component_drv },
 	{}
 };
 MODULE_DEVICE_TABLE(of, g12a_tohdmitx_of_match);
@@ -269,7 +323,7 @@ static int g12a_tohdmitx_probe(struct platform_device *pdev)
 	}
 
 	return devm_snd_soc_register_component(dev,
-			&g12a_tohdmitx_component_drv, g12a_tohdmitx_dai_drv,
+			device_get_match_data(dev), g12a_tohdmitx_dai_drv,
 			ARRAY_SIZE(g12a_tohdmitx_dai_drv));
 }
 

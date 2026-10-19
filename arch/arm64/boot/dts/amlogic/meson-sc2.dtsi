@@ -6,6 +6,7 @@
  * Copyright (c) 2019 Amlogic, Inc. All rights reserved.
  */
 #include <dt-bindings/clock/amlogic,sc2-clkc.h>
+#include <dt-bindings/clock/axg-audio-clkc.h>
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/gpio/meson-sc2-gpio.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
@@ -13,6 +14,8 @@
 #include <dt-bindings/phy/phy.h>
 #include <dt-bindings/power/meson-sc2-power.h>
 #include <dt-bindings/reset/amlogic,meson-sc2-reset.h>
+#include <dt-bindings/reset/amlogic,meson-axg-audio-arb.h>
+#include <dt-bindings/reset/amlogic,meson-g12a-audio-reset.h>
 
 / {
 	compatible = "amlogic,sc2";
@@ -88,6 +91,17 @@
 		clock-frequency = <24000000>;
 		clock-output-names = "xtal";
 		#clock-cells = <0>;
+	};
+
+	tdmif_c: audio-controller-2 {
+		compatible = "amlogic,axg-tdm-iface";
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "TDM_C";
+		clocks = <&clkc_audio AUD_CLKID_MST_C_SCLK>,
+			 <&clkc_audio AUD_CLKID_MST_C_LRCLK>,
+			 <&clkc_audio AUD_CLKID_MST_C_MCLK>;
+		clock-names = "sclk", "lrclk", "mclk";
+		status = "disabled";
 	};
 
 	soc {
@@ -257,6 +271,97 @@
 			};
 		};
 
+		audiobus: bus@fe330000 {
+			compatible = "simple-pm-bus";
+			#address-cells = <2>;
+			#size-cells = <2>;
+			ranges = <0 0 0 0xfe330000 0 0x3000>;
+			power-domains = <&pwrc PWRC_SC2_AUDIO_ID>;
+			status = "disabled";
+
+			clkc_audio: clock-controller@0 {
+				compatible = "amlogic,sc2-audio-clkc";
+				reg = <0 0 0 0xd8>;
+				#clock-cells = <1>;
+				#reset-cells = <1>;
+				clocks = <&clkc CLKID_AUDIO>, <&clkc CLKID_MPLL0>,
+					 <&clkc CLKID_MPLL1>, <&clkc CLKID_MPLL2>,
+					 <&clkc CLKID_MPLL3>, <&clkc CLKID_HIFI_PLL>,
+					 <&clkc CLKID_FCLK_DIV3>, <&clkc CLKID_FCLK_DIV4>,
+					 <&clkc CLKID_FCLK_DIV5>;
+				clock-names = "pclk", "mst_in0", "mst_in1", "mst_in2",
+					      "mst_in3", "mst_in4", "mst_in5", "mst_in6",
+					      "mst_in7";
+				resets = <&reset RESET_AUDIO>;
+			};
+
+			frddr_a: audio-controller@1c0 {
+				compatible = "amlogic,sc2-frddr";
+				reg = <0 0x1c0 0 0x2c>;
+				#sound-dai-cells = <0>;
+				sound-name-prefix = "FRDDR_A";
+				interrupts = <GIC_SPI 36 IRQ_TYPE_EDGE_RISING>;
+				clocks = <&clkc_audio AUD_CLKID_FRDDR_A>;
+				resets = <&arb AXG_ARB_FRDDR_A>,
+					 <&clkc_audio AUD_RESET_FRDDR_A>;
+				reset-names = "arb", "rst";
+				amlogic,fifo-depth = <1024>;
+			};
+
+			frddr_b: audio-controller@200 {
+				compatible = "amlogic,sc2-frddr";
+				reg = <0 0x200 0 0x2c>;
+				#sound-dai-cells = <0>;
+				sound-name-prefix = "FRDDR_B";
+				interrupts = <GIC_SPI 37 IRQ_TYPE_EDGE_RISING>;
+				clocks = <&clkc_audio AUD_CLKID_FRDDR_B>;
+				resets = <&arb AXG_ARB_FRDDR_B>,
+					 <&clkc_audio AUD_RESET_FRDDR_B>;
+				reset-names = "arb", "rst";
+				amlogic,fifo-depth = <1024>;
+			};
+
+			arb: reset-controller@280 {
+				compatible = "amlogic,meson-sc2-audio-arb";
+				reg = <0 0x280 0 4>;
+				#reset-cells = <1>;
+				clocks = <&clkc_audio AUD_CLKID_DDR_ARB>;
+			};
+
+			spdifout_a: audio-controller@480 {
+				compatible = "amlogic,sc2-spdifout";
+				reg = <0 0x480 0 0x50>;
+				#sound-dai-cells = <0>;
+				sound-name-prefix = "SPDIFOUT_A";
+				clocks = <&clkc_audio AUD_CLKID_SPDIFOUT>,
+					 <&clkc_audio AUD_CLKID_SPDIFOUT_CLK>;
+				clock-names = "pclk", "mclk";
+				resets = <&clkc_audio AUD_RESET_SPDIFOUT>;
+				status = "disabled";
+			};
+
+			tdmout_c: audio-controller@580 {
+				compatible = "amlogic,sc2-tdmout";
+				reg = <0 0x580 0 0x40>;
+				sound-name-prefix = "TDMOUT_C";
+				resets = <&clkc_audio AUD_RESET_TDMOUT_C>;
+				clocks = <&clkc_audio AUD_CLKID_TDMOUT_C>,
+					 <&clkc_audio AUD_CLKID_TDMOUT_C_SCLK>,
+					 <&clkc_audio AUD_CLKID_TDMOUT_C_SCLK_SEL>,
+					 <&clkc_audio AUD_CLKID_TDMOUT_C_LRCLK>,
+					 <&clkc_audio AUD_CLKID_TDMOUT_C_LRCLK>;
+				clock-names = "pclk", "sclk", "sclk_sel", "lrclk",
+					      "lrclk_sel";
+			};
+
+			tohdmitx: audio-controller@744 {
+				compatible = "amlogic,sc2-tohdmitx";
+				reg = <0 0x744 0 4>;
+				#sound-dai-cells = <1>;
+				resets = <&clkc_audio AUD_RESET_TOHDMITX>;
+			};
+		};
+
 		ir: ir-receiver@fe084040 {
 			compatible = "amlogic,meson-sc2-ir", "amlogic,meson-gxbb-ir";
 			reg = <0 0xfe084040 0 0x24>;
@@ -387,6 +492,14 @@
 			function = "hdmitx";
 			bias-disable;
 			drive-strength-microamp = <3000>;
+		};
+	};
+
+	spdifout_h_pins: spdifout-h-pins {
+		mux {
+			groups = "spdif_out_h";
+			function = "spdif_out";
+			bias-disable;
 		};
 	};
 

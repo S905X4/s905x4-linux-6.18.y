@@ -47,6 +47,7 @@ struct g12a_toacodec {
 	struct regmap_field *field_dat_sel;
 	struct regmap_field *field_lrclk_sel;
 	struct regmap_field *field_bclk_sel;
+	bool separate_channels;
 };
 
 struct g12a_toacodec_match_data {
@@ -54,6 +55,7 @@ struct g12a_toacodec_match_data {
 	struct reg_field field_dat_sel;
 	struct reg_field field_lrclk_sel;
 	struct reg_field field_bclk_sel;
+	bool separate_channels;
 };
 
 static const char * const g12a_toacodec_mux_texts[] = {
@@ -84,6 +86,9 @@ static int g12a_toacodec_mux_put_enum(struct snd_kcontrol *kcontrol,
 	snd_soc_dapm_mux_update_power(dapm, kcontrol, 0, NULL, NULL);
 
 	regmap_field_write(priv->field_dat_sel, mux);
+	if (priv->separate_channels)
+		snd_soc_component_update_bits(component, e->reg, GENMASK(23, 22),
+					      FIELD_PREP(GENMASK(23, 22), mux));
 	regmap_field_write(priv->field_lrclk_sel, mux);
 	regmap_field_write(priv->field_bclk_sel, mux);
 
@@ -141,6 +146,26 @@ static const struct snd_soc_dapm_widget sm1_toacodec_widgets[] = {
 			 &sm1_toacodec_mux),
 	SND_SOC_DAPM_SWITCH("OUT EN", SND_SOC_NOPM, 0, 0,
 			    &g12a_toacodec_out_enable),
+};
+
+static int sc2_toacodec_clock_event(struct snd_soc_dapm_widget *w,
+				  struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *c = snd_soc_dapm_to_component(w->dapm);
+	unsigned int mask = BIT(29) | BIT(30);
+	int ret;
+
+	ret = snd_soc_component_update_bits(c, TOACODEC_CTRL0, mask,
+			SND_SOC_DAPM_EVENT_ON(event) ? mask : 0);
+	return ret < 0 ? ret : 0;
+}
+
+static const struct snd_soc_dapm_widget sc2_toacodec_widgets[] = {
+	SND_SOC_DAPM_MUX("SRC", SND_SOC_NOPM, 0, 0,
+			 &sm1_toacodec_mux),
+	SND_SOC_DAPM_SWITCH_E("OUT EN", SND_SOC_NOPM, 0, 0,
+		&g12a_toacodec_out_enable, sc2_toacodec_clock_event,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 };
 
 static int g12a_toacodec_input_hw_params(struct snd_pcm_substream *substream,
@@ -220,6 +245,13 @@ static int sm1_toacodec_component_probe(struct snd_soc_component *c)
 				       CTRL0_BLK_CAP_INV_SM1);
 }
 
+static int sc2_toacodec_component_probe(struct snd_soc_component *c)
+{
+	/* Channel 0 from the low word, channel 1 from the high word. */
+	return snd_soc_component_write(c, TOACODEC_CTRL0,
+				       CTRL0_BLK_CAP_INV_SM1 | BIT(20));
+}
+
 static const struct snd_soc_dapm_route g12a_toacodec_routes[] = {
 	{ "SRC", "I2S A", "IN A Playback" },
 	{ "SRC", "I2S B", "IN B Playback" },
@@ -258,6 +290,15 @@ static const struct snd_soc_component_driver sm1_toacodec_component_drv = {
 	.endianness		= 1,
 };
 
+static const struct snd_soc_component_driver sc2_toacodec_component_drv = {
+	.probe = sc2_toacodec_component_probe,
+	.dapm_widgets = sc2_toacodec_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(sc2_toacodec_widgets),
+	.dapm_routes = g12a_toacodec_routes,
+	.num_dapm_routes = ARRAY_SIZE(g12a_toacodec_routes),
+	.endianness = 1,
+};
+
 static const struct regmap_config g12a_toacodec_regmap_cfg = {
 	.reg_bits	= 32,
 	.val_bits	= 32,
@@ -278,6 +319,14 @@ static const struct g12a_toacodec_match_data sm1_toacodec_match_data = {
 	.field_bclk_sel	= REG_FIELD(TOACODEC_CTRL0, 4, 6),
 };
 
+static const struct g12a_toacodec_match_data sc2_toacodec_match_data = {
+	.component_drv = &sc2_toacodec_component_drv,
+	.field_dat_sel = REG_FIELD(TOACODEC_CTRL0, 18, 19),
+	.field_lrclk_sel = REG_FIELD(TOACODEC_CTRL0, 12, 14),
+	.field_bclk_sel = REG_FIELD(TOACODEC_CTRL0, 4, 6),
+	.separate_channels = true,
+};
+
 static const struct of_device_id g12a_toacodec_of_match[] = {
 	{
 		.compatible = "amlogic,g12a-toacodec",
@@ -286,6 +335,10 @@ static const struct of_device_id g12a_toacodec_of_match[] = {
 	{
 		.compatible = "amlogic,sm1-toacodec",
 		.data = &sm1_toacodec_match_data,
+	},
+	{
+		.compatible = "amlogic,sc2-toacodec",
+		.data = &sc2_toacodec_match_data,
 	},
 	{}
 };
@@ -311,6 +364,7 @@ static int g12a_toacodec_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	platform_set_drvdata(pdev, priv);
+	priv->separate_channels = data->separate_channels;
 
 	ret = device_reset(dev);
 	if (ret)

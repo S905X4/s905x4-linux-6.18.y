@@ -7,6 +7,7 @@
 #include <linux/module.h>
 #include <linux/of_platform.h>
 #include <linux/regmap.h>
+#include <linux/reset.h>
 #include <sound/soc.h>
 #include <sound/soc-dai.h>
 #include <sound/pcm_params.h>
@@ -34,7 +35,6 @@
 #define  SPDIFOUT_CTRL0_VSEL		BIT(18)
 #define  SPDIFOUT_CTRL0_VSET		BIT(17)
 #define  SPDIFOUT_CTRL0_MASK_MASK	GENMASK(11, 4)
-#define  SPDIFOUT_CTRL0_MASK(x)		((x) << 4)
 #define SPDIFOUT_CTRL1			0x10
 #define  SPDIFOUT_CTRL1_MSB_POS_MASK	GENMASK(12, 8)
 #define  SPDIFOUT_CTRL1_MSB_POS(x)	((x) << 8)
@@ -60,6 +60,12 @@ struct axg_spdifout {
 	struct regmap *map;
 	struct clk *mclk;
 	struct clk *pclk;
+	const struct axg_spdifout_match_data *data;
+};
+
+struct axg_spdifout_match_data {
+	unsigned int mask;
+	unsigned int shift;
 };
 
 static void axg_spdifout_enable(struct regmap *map)
@@ -128,10 +134,10 @@ static int axg_spdifout_sample_fmt(struct snd_pcm_hw_params *params,
 	/* Set the samples spdifout will pull from the FIFO */
 	switch (params_channels(params)) {
 	case 1:
-		val = SPDIFOUT_CTRL0_MASK(0x1);
+		val = 0x1 << priv->data->shift;
 		break;
 	case 2:
-		val = SPDIFOUT_CTRL0_MASK(0x3);
+		val = 0x3 << priv->data->shift;
 		break;
 	default:
 		dev_err(dai->dev, "too many channels for spdif dai: %u\n",
@@ -140,7 +146,7 @@ static int axg_spdifout_sample_fmt(struct snd_pcm_hw_params *params,
 	}
 
 	regmap_update_bits(priv->map, SPDIFOUT_CTRL0,
-			   SPDIFOUT_CTRL0_MASK_MASK, val);
+			   priv->data->mask, val);
 
 	/* FIFO data are arranged in chunks of 64bits */
 	switch (params_physical_width(params)) {
@@ -393,8 +399,20 @@ static const struct regmap_config axg_spdifout_regmap_cfg = {
 	.max_register	= SPDIFOUT_MUTE_VAL,
 };
 
+static const struct axg_spdifout_match_data axg_spdifout_data = {
+	.mask = SPDIFOUT_CTRL0_MASK_MASK,
+	.shift = 4,
+};
+
+/* TM2-revb/SC2 moved the lane mask to bits 0..15. */
+static const struct axg_spdifout_match_data sc2_spdifout_data = {
+	.mask = GENMASK(15, 0),
+	.shift = 0,
+};
+
 static const struct of_device_id axg_spdifout_of_match[] = {
-	{ .compatible = "amlogic,axg-spdifout", },
+	{ .compatible = "amlogic,axg-spdifout", .data = &axg_spdifout_data },
+	{ .compatible = "amlogic,sc2-spdifout", .data = &sc2_spdifout_data },
 	{}
 };
 MODULE_DEVICE_TABLE(of, axg_spdifout_of_match);
@@ -404,11 +422,17 @@ static int axg_spdifout_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct axg_spdifout *priv;
 	void __iomem *regs;
+	int ret;
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
 		return -ENOMEM;
 	platform_set_drvdata(pdev, priv);
+	priv->data = device_get_match_data(dev);
+
+	ret = device_reset(dev);
+	if (ret)
+		return ret;
 
 	regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(regs))

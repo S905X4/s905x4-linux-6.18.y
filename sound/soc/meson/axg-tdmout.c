@@ -311,6 +311,23 @@ static const struct axg_tdm_formatter_driver sm1_tdmout_drv = {
 	},
 };
 
+/* SC2 uses the common four-lane formatter, but a separate gain block. */
+static const struct snd_soc_component_driver sc2_tdmout_component_drv = {
+	.dapm_widgets = sm1_tdmout_dapm_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(sm1_tdmout_dapm_widgets),
+	.dapm_routes = sm1_tdmout_dapm_routes,
+	.num_dapm_routes = ARRAY_SIZE(sm1_tdmout_dapm_routes),
+};
+
+static const struct axg_tdm_formatter_driver sc2_tdmout_drv = {
+	.component_drv = &sc2_tdmout_component_drv,
+	.regmap_cfg = &axg_tdmout_regmap_cfg,
+	.ops = &axg_tdmout_ops,
+	.quirks = &(const struct axg_tdm_formatter_hw) {
+		.skew_offset = 2,
+	},
+};
+
 static const struct of_device_id axg_tdmout_of_match[] = {
 	{
 		.compatible = "amlogic,axg-tdmout",
@@ -321,6 +338,9 @@ static const struct of_device_id axg_tdmout_of_match[] = {
 	}, {
 		.compatible = "amlogic,sm1-tdmout",
 		.data = &sm1_tdmout_drv,
+	}, {
+		.compatible = "amlogic,sc2-tdmout",
+		.data = &sc2_tdmout_drv,
 	}, {}
 };
 MODULE_DEVICE_TABLE(of, axg_tdmout_of_match);

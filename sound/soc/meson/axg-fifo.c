@@ -362,6 +362,17 @@ int axg_fifo_probe(struct platform_device *pdev)
 	if (IS_ERR(fifo->arb))
 		return dev_err_probe(dev, PTR_ERR(fifo->arb), "failed to get arb reset\n");
 
+	if (data->reset) {
+		struct reset_control *rst;
+
+		rst = devm_reset_control_get_exclusive(dev, "rst");
+		if (IS_ERR(rst))
+			return dev_err_probe(dev, PTR_ERR(rst), "failed to get fifo reset\n");
+		ret = reset_control_reset(rst);
+		if (ret)
+			return dev_err_probe(dev, ret, "failed to reset fifo\n");
+	}
+
 	fifo->irq = of_irq_get(dev->of_node, 0);
 	if (fifo->irq <= 0) {
 		dev_err(dev, "failed to get irq: %d\n", fifo->irq);

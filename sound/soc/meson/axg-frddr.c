@@ -372,6 +372,77 @@ static const struct axg_fifo_match_data sm1_frddr_match_data = {
 	.dai_drv		= &g12a_frddr_dai_drv
 };
 
+static int sc2_frddr_pcm_hw_params(struct snd_soc_component *component,
+				 struct snd_pcm_substream *ss,
+				 struct snd_pcm_hw_params *params)
+{
+	struct axg_fifo *fifo = snd_soc_component_get_drvdata(component);
+
+	regmap_update_bits(fifo->map, FIFO_CTRL2, GENMASK(31, 24),
+			   FIELD_PREP(GENMASK(31, 24), params_channels(params) - 1));
+
+	return g12a_fifo_pcm_hw_params(component, ss, params);
+}
+
+static int sc2_frddr_pcm_trigger(struct snd_soc_component *component,
+			       struct snd_pcm_substream *ss, int cmd)
+{
+	struct axg_fifo *fifo = snd_soc_component_get_drvdata(component);
+	unsigned int val, outputs;
+	int ret;
+
+	switch (cmd) {
+	case SNDRV_PCM_TRIGGER_START:
+	case SNDRV_PCM_TRIGGER_RESUME:
+	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+		/* Requests must be disabled while enabling the DMA engine. */
+		regmap_read(fifo->map, FIFO_CTRL2, &outputs);
+		regmap_update_bits(fifo->map, FIFO_CTRL2,
+				   BIT(4) | BIT(12) | BIT(20), 0);
+		ret = axg_fifo_pcm_trigger(component, ss, cmd);
+		regmap_update_bits(fifo->map, FIFO_CTRL2,
+				   BIT(4) | BIT(12) | BIT(20), outputs);
+		return ret;
+	case SNDRV_PCM_TRIGGER_STOP:
+	case SNDRV_PCM_TRIGGER_SUSPEND:
+	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+		regmap_read(fifo->map, FIFO_CTRL0, &val);
+		if (!(val & CTRL0_DMA_EN))
+			return 0;
+		/* Drain outstanding DDR bursts before disabling the engine. */
+		regmap_update_bits(fifo->map, FIFO_CTRL2, BIT(21), 0);
+		regmap_update_bits(fifo->map, FIFO_CTRL2, BIT(21), BIT(21));
+		ret = regmap_read_poll_timeout(fifo->map, FIFO_STATUS1, val,
+					       val & BIT(17), 1, 200);
+		axg_fifo_pcm_trigger(component, ss, cmd);
+		regmap_update_bits(fifo->map, FIFO_CTRL2, BIT(21), 0);
+		return ret;
+	default:
+		return -EINVAL;
+	}
+}
+
+static const struct snd_soc_component_driver sc2_frddr_component_drv = {
+	.dapm_widgets = sm1_frddr_dapm_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(sm1_frddr_dapm_widgets),
+	.dapm_routes = g12a_frddr_dapm_routes,
+	.num_dapm_routes = ARRAY_SIZE(g12a_frddr_dapm_routes),
+	.open = axg_fifo_pcm_open,
+	.close = axg_fifo_pcm_close,
+	.hw_params = sc2_frddr_pcm_hw_params,
+	.hw_free = axg_fifo_pcm_hw_free,
+	.pointer = axg_fifo_pcm_pointer,
+	.trigger = sc2_frddr_pcm_trigger,
+	.legacy_dai_naming = 1,
+};
+
+static const struct axg_fifo_match_data sc2_frddr_match_data = {
+	.field_threshold = REG_FIELD(FIFO_CTRL1, 16, 23),
+	.component_drv = &sc2_frddr_component_drv,
+	.dai_drv = &g12a_frddr_dai_drv,
+	.reset = true,
+};
+
 static const struct of_device_id axg_frddr_of_match[] = {
 	{
 		.compatible = "amlogic,axg-frddr",
@@ -382,6 +453,9 @@ static const struct of_device_id axg_frddr_of_match[] = {
 	}, {
 		.compatible = "amlogic,sm1-frddr",
 		.data = &sm1_frddr_match_data,
+	}, {
+		.compatible = "amlogic,sc2-frddr",
+		.data = &sc2_frddr_match_data,
 	}, {}
 };
 MODULE_DEVICE_TABLE(of, axg_frddr_of_match);

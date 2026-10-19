@@ -2,11 +2,12 @@
 /*
  * HK1 RBOX X4, S905X4, 4GB variant.
  * Wiring and usable-memory boundary: original sc2_ah212_4g vendor DT.
- * This intentionally leaves CPU DVFS, Wi-Fi, display and media unmodelled.
+ * CPU DVFS, Wi-Fi and hardware video decoding remain unmodelled.
  */
 /dts-v1/;
 #include "meson-sc2.dtsi"
 #include <dt-bindings/leds/common.h>
+#include <dt-bindings/sound/meson-g12a-tohdmitx.h>
 
 / {
 	model = "HK1 RBOX X4 (S905X4, 4GB)";
@@ -106,6 +107,58 @@
 		};
 	};
 
+	spdif_dit: spdif-transmitter {
+		compatible = "linux,spdif-dit";
+		#sound-dai-cells = <0>;
+	};
+
+	sound {
+		compatible = "amlogic,axg-sound-card";
+		model = "HK1 RBOX X4";
+		audio-aux-devs = <&tdmout_c>;
+		audio-routing = "SPDIFOUT_A IN 0", "FRDDR_A OUT 3",
+				"TDMOUT_C IN 1", "FRDDR_B OUT 2",
+				"TDM_C Playback", "TDMOUT_C OUT";
+		clocks = <&clkc CLKID_MPLL2>, <&clkc CLKID_MPLL0>,
+			 <&clkc CLKID_MPLL1>;
+		assigned-clocks = <&clkc CLKID_MPLL2>, <&clkc CLKID_MPLL0>,
+				  <&clkc CLKID_MPLL1>;
+		assigned-clock-parents = <0>, <0>, <0>;
+		assigned-clock-rates = <294912000>, <270950400>, <393216000>;
+
+		dai-link-0 {
+			sound-dai = <&frddr_a>;
+		};
+
+		dai-link-1 {
+			sound-dai = <&frddr_b>;
+		};
+
+		dai-link-2 {
+			sound-dai = <&spdifout_a>;
+			codec {
+				sound-dai = <&spdif_dit>;
+			};
+		};
+
+		dai-link-3 {
+			sound-dai = <&tdmif_c>;
+			dai-format = "i2s";
+			dai-tdm-slot-tx-mask-0 = <1 1>;
+			mclk-fs = <256>;
+			codec {
+				sound-dai = <&tohdmitx TOHDMITX_I2S_IN_C>;
+			};
+		};
+
+		dai-link-4 {
+			sound-dai = <&tohdmitx TOHDMITX_I2S_OUT>;
+			codec {
+				sound-dai = <&hdmi_tx>;
+			};
+		};
+	};
+
 	reserved-memory {
 		#address-cells = <2>;
 		#size-cells = <2>;
@@ -154,6 +207,20 @@
 	status = "okay";
 	pinctrl-names = "default";
 	pinctrl-0 = <&hdmitx_hpd_pins>, <&hdmitx_ddc_pins>;
+};
+
+&audiobus {
+	status = "okay";
+};
+
+&spdifout_a {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&spdifout_h_pins>;
+};
+
+&tdmif_c {
+	status = "okay";
 };
 
 &ir {

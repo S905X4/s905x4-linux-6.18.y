@@ -70,6 +70,7 @@ struct axg_fifo_match_data {
 	const struct snd_soc_component_driver *component_drv;
 	struct snd_soc_dai_driver *dai_drv;
 	struct reg_field field_threshold;
+	bool reset;
 };
 
 int axg_fifo_pcm_open(struct snd_soc_component *component,
