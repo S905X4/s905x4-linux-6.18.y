@@ -67,6 +67,12 @@
 	status = "okay";
 };
 
+&ir {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&remote_input_pins>;
+};
+
 &sd_emmc_b {
 	status = "okay";
 	pinctrl-names = "default";

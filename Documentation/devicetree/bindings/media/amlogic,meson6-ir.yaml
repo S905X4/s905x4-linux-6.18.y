@@ -11,6 +11,14 @@ maintainers:
 
 allOf:
   - $ref: rc.yaml#
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: amlogic,meson-sc2-ir
+    then:
+      required:
+        - clocks
 
 properties:
   compatible:
@@ -23,11 +31,17 @@ properties:
       - items:
           - const: amlogic,meson-gx-ir
           - const: amlogic,meson-gxbb-ir
+      - items:
+          - const: amlogic,meson-sc2-ir
+          - const: amlogic,meson-gxbb-ir
 
   reg:
     maxItems: 1
 
   interrupts:
+    maxItems: 1
+
+  clocks:
     maxItems: 1
 
 required:

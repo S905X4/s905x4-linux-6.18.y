@@ -5,6 +5,7 @@
  * Copyright (C) 2014 Beniamino Galvani <b.galvani@gmail.com>
  */
 
+#include <linux/clk.h>
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/interrupt.h>
@@ -449,6 +450,7 @@ static int meson_ir_probe(struct platform_device *pdev)
 	void __iomem *res_start;
 	const char *map_name;
 	struct meson_ir *ir;
+	struct clk *clk;
 	int irq, ret;
 
 	ir = devm_kzalloc(dev, sizeof(struct meson_ir), GFP_KERNEL);
@@ -460,6 +462,10 @@ static int meson_ir_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, -ENODEV, "failed to get match data\n");
 
 	ir->param = match_data;
+
+	clk = devm_clk_get_optional_enabled(dev, NULL);
+	if (IS_ERR(clk))
+		return dev_err_probe(dev, PTR_ERR(clk), "failed to enable clock\n");
 
 	res_start = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(res_start))
