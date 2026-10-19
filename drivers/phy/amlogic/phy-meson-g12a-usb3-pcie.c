@@ -213,6 +213,8 @@ static int phy_g12a_usb3_init(struct phy *phy)
 	regmap_update_bits(priv->regmap, PHY_R0,
 			   PHY_R0_PCIE_USB3_SWITCH,
 			   PHY_R0_PCIE_USB3_SWITCH);
+	if (priv->soc_id == MESON_USB3_PCIE_SC2)
+		udelay(100);
 
 	/* SC2 must leave the low-power state before accessing the CR bus. */
 	if (priv->soc_id == MESON_USB3_PCIE_SC2)
@@ -347,21 +349,46 @@ static int phy_g12a_usb3_pcie_reset(struct phy *phy)
 static int phy_g12a_usb3_pcie_init(struct phy *phy)
 {
 	struct phy_g12a_usb3_pcie_priv *priv = phy_get_drvdata(phy);
+	int ret;
 
-	if (priv->mode == PHY_TYPE_USB3)
-		return phy_g12a_usb3_init(phy);
+	if (priv->soc_id == MESON_USB3_PCIE_SC2) {
+		/* The lane must be selected before starting its reference PLL. */
+		if (priv->mode == PHY_TYPE_USB3) {
+			ret = regmap_update_bits(priv->regmap, PHY_R0,
+						 PHY_R0_PCIE_USB3_SWITCH,
+						 PHY_R0_PCIE_USB3_SWITCH);
+			if (ret)
+				return ret;
+			udelay(100);
+		}
 
-	return 0;
+		ret = clk_prepare_enable(priv->clk_ref);
+		if (ret)
+			return ret;
+	}
+
+	if (priv->mode != PHY_TYPE_USB3)
+		return 0;
+
+	ret = phy_g12a_usb3_init(phy);
+	if (ret && priv->soc_id == MESON_USB3_PCIE_SC2)
+		clk_disable_unprepare(priv->clk_ref);
+
+	return ret;
 }
 
 static int phy_g12a_usb3_pcie_exit(struct phy *phy)
 {
 	struct phy_g12a_usb3_pcie_priv *priv = phy_get_drvdata(phy);
+	int ret = 0;
 
 	if (priv->mode == PHY_TYPE_USB3)
-		return reset_control_reset(priv->reset);
+		ret = reset_control_reset(priv->reset);
 
-	return 0;
+	if (priv->soc_id == MESON_USB3_PCIE_SC2)
+		clk_disable_unprepare(priv->clk_ref);
+
+	return ret;
 }
 
 static struct phy *phy_g12a_usb3_pcie_xlate(struct device *dev,
@@ -425,7 +452,11 @@ static int phy_g12a_usb3_pcie_probe(struct platform_device *pdev)
 	if (IS_ERR(priv->regmap_cr))
 		return PTR_ERR(priv->regmap_cr);
 
-	priv->clk_ref = devm_clk_get_enabled(dev, "ref_clk");
+	/* SC2 needs its consumer's mode before selecting and clocking the lane. */
+	if (priv->soc_id == MESON_USB3_PCIE_SC2)
+		priv->clk_ref = devm_clk_get(dev, "ref_clk");
+	else
+		priv->clk_ref = devm_clk_get_enabled(dev, "ref_clk");
 	if (IS_ERR(priv->clk_ref))
 		return PTR_ERR(priv->clk_ref);
 
