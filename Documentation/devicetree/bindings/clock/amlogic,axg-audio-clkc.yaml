@@ -10,10 +10,13 @@ maintainers:
   - Neil Armstrong <neil.armstrong@linaro.org>
   - Jerome Brunet <jbrunet@baylibre.com>
 
-description:
+description: |
   The Amlogic AXG audio clock controller generates and supplies clock to the
   other elements of the audio subsystem, such as fifos, i2s, spdif and pdm
   devices.
+  SC2 uses the same clock and reset IDs as SM1 (axg-audio-clkc.h and
+  amlogic,meson-g12a-audio-reset.h), except that the CLK81 and SYSCLK divider
+  IDs are not implemented: its peripheral gates are fed directly by pclk.
 
 properties:
   compatible:
@@ -21,6 +24,7 @@ properties:
       - amlogic,axg-audio-clkc
       - amlogic,g12a-audio-clkc
       - amlogic,sm1-audio-clkc
+      - amlogic,sc2-audio-clkc
 
   '#clock-cells':
     const: 1
@@ -116,6 +120,7 @@ allOf:
             enum:
               - amlogic,g12a-audio-clkc
               - amlogic,sm1-audio-clkc
+              - amlogic,sc2-audio-clkc
     then:
       required:
         - '#reset-cells'

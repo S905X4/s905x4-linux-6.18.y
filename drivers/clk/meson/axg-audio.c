@@ -1321,7 +1321,21 @@ struct audioclk_data {
 	struct meson_clk_hw_data hw_clks;
 	const char *rst_drvname;
 	unsigned int max_register;
+	bool bypass_sysclk;
 };
+
+static struct clk_hw *sc2_audio_clk_get(struct of_phandle_args *clkspec,
+				      void *data)
+{
+	unsigned int id = clkspec->args[0];
+
+	if (id >= AUD_CLKID_CLK81_EN && id <= AUD_CLKID_SYSCLK_B_EN)
+		return ERR_PTR(-ENOENT);
+	if (id == AUD_CLKID_TOP)
+		return &axg_aud_top;
+
+	return meson_clk_hw_get(clkspec, data);
+}
 
 static int axg_audio_clkc_probe(struct platform_device *pdev)
 {
@@ -1364,7 +1378,15 @@ static int axg_audio_clkc_probe(struct platform_device *pdev)
 	for (i = AUD_CLKID_DDR_ARB; i < data->hw_clks.num; i++) {
 		const char *name;
 
-		hw = data->hw_clks.hws[i];
+		if (data->bypass_sysclk) {
+			struct of_phandle_args spec = { .args_count = 1, .args = { i } };
+
+			hw = sc2_audio_clk_get(&spec, (void *)&data->hw_clks);
+			if (IS_ERR(hw))
+				continue;
+		} else {
+			hw = data->hw_clks.hws[i];
+		}
 		/* array might be sparse */
 		if (!hw)
 			continue;
@@ -1378,7 +1400,9 @@ static int axg_audio_clkc_probe(struct platform_device *pdev)
 		}
 	}
 
-	ret = devm_of_clk_add_hw_provider(dev, meson_clk_hw_get, (void *)&data->hw_clks);
+	ret = devm_of_clk_add_hw_provider(dev,
+		data->bypass_sysclk ? sc2_audio_clk_get : meson_clk_hw_get,
+		(void *)&data->hw_clks);
 	if (ret)
 		return ret;
 
@@ -1419,6 +1443,17 @@ static const struct audioclk_data sm1_audioclk_data = {
 	.max_register = AUDIO_EARCRX_DMAC_CLK_CTRL,
 };
 
+/* Register offsets and reset bits are shared with SM1; sysclk is not. */
+static const struct audioclk_data sc2_audioclk_data = {
+	.hw_clks = {
+		.hws = sm1_audio_hw_clks,
+		.num = ARRAY_SIZE(sm1_audio_hw_clks),
+	},
+	.rst_drvname = "rst-sm1",
+	.max_register = AUDIO_EARCRX_DMAC_CLK_CTRL,
+	.bypass_sysclk = true,
+};
+
 static const struct of_device_id clkc_match_table[] = {
 	{
 		.compatible = "amlogic,axg-audio-clkc",
@@ -1429,6 +1464,9 @@ static const struct of_device_id clkc_match_table[] = {
 	}, {
 		.compatible = "amlogic,sm1-audio-clkc",
 		.data = &sm1_audioclk_data
+	}, {
+		.compatible = "amlogic,sc2-audio-clkc",
+		.data = &sc2_audioclk_data
 	}, {}
 };
 MODULE_DEVICE_TABLE(of, clkc_match_table);
