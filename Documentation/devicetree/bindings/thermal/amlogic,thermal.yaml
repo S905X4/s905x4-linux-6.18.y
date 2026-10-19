@@ -9,7 +9,13 @@ title: Amlogic Thermal
 maintainers:
   - Guillaume La Roque <glaroque@baylibre.com>
 
-description: Binding for Amlogic Thermal
+description: |
+  Amlogic R1P1 temperature sensors use a per-sensor calibrated trim word.
+  SC2 exposes this word as a second MMIO resource in the system controller,
+  rather than through the AO secure syscon used on G12A and A1. The CPU and
+  DDR sensors share a 500 kHz functional clock but have independent trim
+  words. SC2 calibration validity is checked before the thermal zone is
+  registered; no uncalibrated temperature estimate is provided.
 
 $ref: thermal-sensor.yaml#
 
@@ -22,9 +28,13 @@ properties:
               - amlogic,g12a-ddr-thermal
           - const: amlogic,g12a-thermal
       - const: amlogic,a1-cpu-thermal
+      - enum:
+          - amlogic,sc2-cpu-thermal
+          - amlogic,sc2-ddr-thermal
 
   reg:
-    maxItems: 1
+    minItems: 1
+    maxItems: 2
 
   interrupts:
     maxItems: 1
@@ -47,7 +57,29 @@ required:
   - reg
   - interrupts
   - clocks
-  - amlogic,ao-secure
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            enum:
+              - amlogic,sc2-cpu-thermal
+              - amlogic,sc2-ddr-thermal
+    then:
+      properties:
+        reg:
+          minItems: 2
+          items:
+            - description: Sensor registers
+            - description: Calibrated trim word in the system controller
+        amlogic,ao-secure: false
+    else:
+      properties:
+        reg:
+          maxItems: 1
+      required:
+        - amlogic,ao-secure
 
 unevaluatedProperties: false
 
