@@ -53,6 +53,15 @@ config ARM_ARMADA_8K_CPUFREQ
 
 	  If in doubt, say N.
 
+config ARM_MESON_SC2_CPUFREQ
+	tristate "Amlogic SC2 CPU/DSU frequency scaling"
+	depends on ARCH_MESON || COMPILE_TEST
+	depends on CPUFREQ_DT && REGULATOR
+	help
+	  Coordinate SC2's shared CPU supply and independent DSU clock with
+	  CPU OPP transitions. Firmware-mediated PLL writes are checked before
+	  lowering voltage; failed clock transitions retain the safe voltage.
+
 config ARM_SCPI_CPUFREQ
 	tristate "SCPI based CPUfreq driver"
 	depends on ARM_SCPI_PROTOCOL && COMMON_CLK_SCPI
