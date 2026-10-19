@@ -53,3 +53,20 @@ HDMI Video Output
 
 .. kernel-doc:: drivers/gpu/drm/meson/meson_dw_hdmi.c
    :doc: HDMI Output
+
+SC2 protected HDMI registers
+----------------------------
+
+SC2 firmware protects the DWC clock-disable, HDCP configuration and HDCP2.2
+control registers. Direct byte MMIO reads are possible, but writes to those
+registers are ignored. The SC2 register callbacks use the firmware HDMI
+register services (SMC 0x82000018/0x82000019) with the encoded secure DWC
+selector, not the physical MMIO address. Other DWC registers and other
+Meson variants retain their existing access paths.
+
+The unencrypted bridge also initializes HDCP2.2 control to the inactive
+setting used by the SC2 CoreELEC reference driver, without HDCP authentication.
+On HK1 RBOX X4, a reversible probe changed HDCPCFG1 from 0x01 to 0x03 through
+SMC, while a direct MMIO write to that same register was ignored. Correct
+register readback, measured pixel clocks and active DRM scanout are not proof
+that a physical sink displays the intended pixels.

@@ -157,4 +157,11 @@
  */
 #define HDMITX_TOP_STAT0                        (0x00E)
 
+/* SC2 protected DWC registers use the firmware's encoded SMC addresses. */
+#define HDMITX_DWC_SECURE_REG(addr)              (0x11000000 | (addr))
+#define HDMITX_DWC_MC_CLKDIS                    0x4001
+#define HDMITX_DWC_A_HDCPCFG0                    0x5000
+#define HDMITX_DWC_A_HDCPCFG1                    0x5001
+#define HDMITX_DWC_HDCP22REG_CTRL                0x7904
+
 #endif /* __MESON_DW_HDMI_H */

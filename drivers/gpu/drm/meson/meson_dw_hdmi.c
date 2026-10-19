@@ -5,6 +5,7 @@
  * Copyright (C) 2015 Amlogic, Inc. All rights reserved.
  */
 
+#include <linux/arm-smccc.h>
 #include <linux/clk.h>
 #include <linux/component.h>
 #include <linux/kernel.h>
@@ -245,9 +246,30 @@ static unsigned int dw_hdmi_dwc_read(struct meson_dw_hdmi *dw_hdmi,
 	return data;
 }
 
+static bool dw_hdmi_sc2_secure_reg(unsigned int addr)
+{
+	switch (addr) {
+	case HDMITX_DWC_MC_CLKDIS:
+	case HDMITX_DWC_A_HDCPCFG0:
+	case HDMITX_DWC_A_HDCPCFG1:
+	case HDMITX_DWC_HDCP22REG_CTRL:
+		return true;
+	default:
+		return false;
+	}
+}
+
 static unsigned int dw_hdmi_g12a_dwc_read(struct meson_dw_hdmi *dw_hdmi,
 					  unsigned int addr)
 {
+	if (dw_hdmi->priv->sc2 && dw_hdmi_sc2_secure_reg(addr)) {
+		struct arm_smccc_res res;
+
+		arm_smccc_smc(0x82000018, HDMITX_DWC_SECURE_REG(addr),
+			      0, 0, 0, 0, 0, 0, &res);
+		return res.a0;
+	}
+
 	return readb(dw_hdmi->hdmitx + addr);
 }
 
@@ -271,6 +293,14 @@ static inline void dw_hdmi_dwc_write(struct meson_dw_hdmi *dw_hdmi,
 static inline void dw_hdmi_g12a_dwc_write(struct meson_dw_hdmi *dw_hdmi,
 					  unsigned int addr, unsigned int data)
 {
+	if (dw_hdmi->priv->sc2 && dw_hdmi_sc2_secure_reg(addr)) {
+		struct arm_smccc_res res;
+
+		arm_smccc_smc(0x82000019, HDMITX_DWC_SECURE_REG(addr),
+			      data, 0, 0, 0, 0, 0, &res);
+		return;
+	}
+
 	writeb(data, dw_hdmi->hdmitx + addr);
 }
 
@@ -673,6 +703,12 @@ static void meson_dw_hdmi_init(struct meson_dw_hdmi *meson_dw_hdmi)
 
 	meson_dw_hdmi->data->top_write(meson_dw_hdmi,
 				       HDMITX_TOP_CLK_CNTL, 0xff);
+
+	if (priv->sc2) {
+		/* Keep HDCP2.2 inactive for the unencrypted generic bridge. */
+		meson_dw_hdmi->data->dwc_write(meson_dw_hdmi,
+					      HDMITX_DWC_HDCP22REG_CTRL, BIT(1));
+	}
 
 	/* Enable normal output to PHY */
 	meson_dw_hdmi->data->top_write(meson_dw_hdmi, HDMITX_TOP_BIST_CNTL, BIT(12));
