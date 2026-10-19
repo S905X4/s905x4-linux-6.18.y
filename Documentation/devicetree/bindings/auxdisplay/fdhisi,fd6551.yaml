@@ -65,10 +65,8 @@ patternProperties:
       any of the four text grids or duplicate another indicator index.
     properties:
       reg:
-        maxItems: 1
-        items:
-          minimum: 0
-          maximum: 34
+        minimum: 0
+        maximum: 34
     required:
       - reg
 
