@@ -24,6 +24,9 @@ static unsigned long clk_regmap_secure_div_recalc_rate(struct clk_hw *hw,
 		arm_smccc_smc(CPUCLK_SECURE_RW, CLK_DSU_REG_RW,
 			      0, 0, 0, 0, 0, 0, &res);
 	val = res.a0;
+	if ((int)res.a0 == SMCCC_RET_NOT_SUPPORTED)
+		return 0;
+	prate = clk_hw_get_rate(clk_hw_get_parent(hw));
 
 	val >>= div->shift;
 	val &= clk_div_mask(div->width);
@@ -48,6 +51,8 @@ static int clk_regmap_secure_div_determine_rate(struct clk_hw *hw,
 			arm_smccc_smc(CPUCLK_SECURE_RW, CLK_DSU_REG_RW,
 				      0, 0, 0, 0, 0, 0, &res);
 		val = res.a0;
+		if ((int)res.a0 == SMCCC_RET_NOT_SUPPORTED)
+			return -EOPNOTSUPP;
 
 		val >>= div->shift;
 		val &= clk_div_mask(div->width);
@@ -73,13 +78,22 @@ static int clk_regmap_secure_div_set_rate(struct clk_hw *hw, unsigned long rate,
 	if (ret < 0)
 		return ret;
 
-	if (!strcmp(clk_hw_get_name(hw), "cpu_clk_dyn1_div"))
+	if (!strcmp(clk_hw_get_name(hw), "cpu_clk_dyn1_div")) {
 		arm_smccc_smc(CPUCLK_SECURE_RW, CPU_DIVIDER_SET_RATE, ret,
 			      div->width, div->shift, 0, 0, 0, &res);
-	else
+		arm_smccc_smc(CPUCLK_SECURE_RW, CLK_CPU_REG_RW,
+			      0, 0, 0, 0, 0, 0, &res);
+	} else {
 		arm_smccc_smc(CPUCLK_SECURE_RW, DSU_DIVIDER_SET_RATE, ret,
 			      div->width, div->shift, 0, 0, 0, &res);
-	return 0;
+		arm_smccc_smc(CPUCLK_SECURE_RW, CLK_DSU_REG_RW,
+			      0, 0, 0, 0, 0, 0, &res);
+	}
+	if ((int)res.a0 == SMCCC_RET_NOT_SUPPORTED)
+		return -EOPNOTSUPP;
+
+	return ((res.a0 >> div->shift) & clk_div_mask(div->width)) == ret ?
+		0 : -EIO;
 };
 
 /* Would prefer clk_regmap_div_ro_ops but clashes with qcom */
@@ -121,9 +135,24 @@ static u8 clk_regmap_secure_mux_get_parent(struct clk_hw *hw)
 			      0, 0, 0, 0, 0, 0, &res);
 
 	val = res.a0;
+	if ((int)res.a0 == SMCCC_RET_NOT_SUPPORTED)
+		return clk_hw_get_num_parents(hw);
+
 	val >>= mux->shift;
 	val &= mux->mask;
 	return clk_mux_val_to_index(hw, mux->table, mux->flags, val);
+}
+
+static unsigned long clk_regmap_secure_mux_recalc_rate(struct clk_hw *hw,
+						      unsigned long parent_rate)
+{
+	u8 index = clk_regmap_secure_mux_get_parent(hw);
+	struct clk_hw *parent;
+
+	if (index >= clk_hw_get_num_parents(hw))
+		return 0;
+	parent = clk_hw_get_parent_by_index(hw, index);
+	return parent ? clk_hw_get_rate(parent) : 0;
 }
 
 static int clk_regmap__secure_mux_set_parent(struct clk_hw *hw, u8 index)
@@ -151,7 +180,7 @@ static int clk_regmap__secure_mux_set_parent(struct clk_hw *hw, u8 index)
 		arm_smccc_smc(CPUCLK_SECURE_RW, SET_DSU_PRE_MUX_PARENT,
 			      val, mux->mask, mux->shift, 0, 0, 0, &res);
 
-	return 0;
+	return clk_regmap_secure_mux_get_parent(hw) == index ? 0 : -EIO;
 }
 
 static int clk_regmap_secure_mux_determine_rate(struct clk_hw *hw,
@@ -164,12 +193,14 @@ static int clk_regmap_secure_mux_determine_rate(struct clk_hw *hw,
 }
 
 const struct clk_ops meson_clk_regmap_secure_mux_ops = {
+	.recalc_rate = clk_regmap_secure_mux_recalc_rate,
 	.get_parent = clk_regmap_secure_mux_get_parent,
 	.set_parent = clk_regmap__secure_mux_set_parent,
 	.determine_rate = clk_regmap_secure_mux_determine_rate,
 };
 
 const struct clk_ops meson_clk_regmap_secure_mux_ro_ops = {
+	.recalc_rate = clk_regmap_secure_mux_recalc_rate,
 	.get_parent = clk_regmap_secure_mux_get_parent,
 };
 
@@ -191,6 +222,9 @@ meson_secure_clk_cpu_dyndiv_recalc_rate(struct clk_hw *hw,
 	arm_smccc_smc(CPUCLK_SECURE_RW, CLK_CPU_REG_RW,
 		      0, 0, 0, 0, 0, 0, &res);
 	val = res.a0;
+	if ((int)res.a0 == SMCCC_RET_NOT_SUPPORTED)
+		return 0;
+	prate = clk_hw_get_rate(clk_hw_get_parent(hw));
 
 	val >>= data->div.shift;
 	val &= clk_div_mask(data->div.width);
@@ -222,7 +256,13 @@ static int meson_secure_clk_cpu_dyndiv_set_rate(struct clk_hw *hw,
 
 	arm_smccc_smc(CPUCLK_SECURE_RW, CPU_DIVIDER_SET_RATE, ret,
 		      data->div.width, data->div.shift, 0, 0, 0, &res);
-	return 0;
+	arm_smccc_smc(CPUCLK_SECURE_RW, CLK_CPU_REG_RW,
+		      0, 0, 0, 0, 0, 0, &res);
+	if ((int)res.a0 == SMCCC_RET_NOT_SUPPORTED)
+		return -EOPNOTSUPP;
+
+	return ((res.a0 >> data->div.shift) & clk_div_mask(data->div.width)) == ret ?
+		0 : -EIO;
 };
 
 const struct clk_ops meson_secure_clk_cpu_dyndiv_ops = {

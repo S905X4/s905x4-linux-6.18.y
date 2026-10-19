@@ -15,6 +15,16 @@ description: |
   clock services (SMC 0x8200009a and 0x8200009b). Clock indices are defined
   in dt-bindings/clock/amlogic,sc2-clkc.h.
 
+  Secure clock services must implement the SC2 CPU/DSU register read and
+  write ABI; registration alone does not establish firmware rate support.
+  Read-only output dividers retain their firmware-programmed divisor when
+  rounding rates. CPU consumers must coordinate the DSU clock and supply
+  voltage before changing the CPU clock; the provider's parking notifiers
+  protect clock reprogramming, not the board's DVFS policy.
+  Secure PLL rate requests are limited to the documented SC2 DCO tables;
+  a fixed firmware output divisor does not imply every CPU/DSU OPP can be
+  generated. Consumers must reject an unachievable output rate.
+
 properties:
   compatible:
     const: amlogic,sc2-clkc

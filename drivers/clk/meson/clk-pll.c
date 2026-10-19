@@ -33,6 +33,7 @@
 #include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/io.h>
+#include <linux/limits.h>
 #include <linux/math64.h>
 #include <linux/module.h>
 
@@ -504,6 +505,8 @@ static int meson_secure_clk_pll_set_rate(struct clk_hw *hw, unsigned long rate,
 			__func__, clk_hw_get_name(hw), rate);
 		ret = __meson_secure_clk_pll_set_rate(hw, rate, parent_rate);
 	}
+	if (!ret && meson_clk_pll_recalc_rate(hw, parent_rate) != rate)
+		return -EIO;
 
 	return ret;
 }
@@ -511,8 +514,26 @@ static int meson_secure_clk_pll_set_rate(struct clk_hw *hw, unsigned long rate,
 static long meson_secure_clk_pll_round_rate(struct clk_hw *hw, unsigned long rate,
 					    unsigned long *parent_rate)
 {
-	/* The secure firmware selects the PLL parameters for the requested rate. */
-	return rate;
+	struct clk_regmap *clk = to_clk_regmap(hw);
+	struct meson_clk_pll_data *pll = meson_clk_pll_data(clk);
+	const struct pll_params_table *entry;
+	unsigned long prate = parent_rate ? *parent_rate :
+		clk_hw_get_rate(clk_hw_get_parent(hw));
+	unsigned long best = 0, best_delta = ULONG_MAX;
+
+	/* Do not advertise arbitrary, potentially out-of-range DCO requests. */
+	for (entry = pll->table; entry && entry->n; entry++) {
+		unsigned long now = __pll_params_to_rate(prate, entry->m,
+							entry->n, 0, pll);
+		unsigned long delta = now > rate ? now - rate : rate - now;
+
+		if (delta < best_delta) {
+			best = now;
+			best_delta = delta;
+		}
+	}
+
+	return best ? best : -EINVAL;
 }
 
 static int meson_secure_clk_pll_enable(struct clk_hw *hw)
