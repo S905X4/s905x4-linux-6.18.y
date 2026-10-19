@@ -1368,16 +1368,28 @@ static struct clk_regmap sc2_hdmi_pll_dco = {
 	},
 };
 
+static unsigned long sc2_hdmi_pll_od_recalc_rate(struct clk_hw *hw,
+					       unsigned long parent_rate)
+{
+	struct clk_regmap *clk = to_clk_regmap(hw);
+	unsigned int value;
+
+	if (regmap_read(clk->map, ANACTRL_HDMIPLL_CTRL0, &value))
+		return 0;
+
+	/* OD1 and OD2 are separate two-bit power-of-two dividers. */
+	return parent_rate >> (((value >> 16) & 3) + ((value >> 18) & 3));
+}
+
+static const struct clk_ops sc2_hdmi_pll_od_ops = {
+	.init = clk_regmap_init,
+	.recalc_rate = sc2_hdmi_pll_od_recalc_rate,
+};
+
 static struct clk_regmap sc2_hdmi_pll_od = {
-	.data = &(struct clk_regmap_div_data){
-		.offset = ANACTRL_HDMIPLL_CTRL0,
-		.shift = 16,
-		.width = 4,
-		.flags = CLK_DIVIDER_POWER_OF_TWO,
-	},
 	.hw.init = &(struct clk_init_data){
 		.name = "hdmi_pll_od",
-		.ops = &clk_regmap_divider_ro_ops,
+		.ops = &sc2_hdmi_pll_od_ops,
 		.parent_hws = (const struct clk_hw *[]) {
 			&sc2_hdmi_pll_dco.hw
 		},
