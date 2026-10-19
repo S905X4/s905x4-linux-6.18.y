@@ -6,6 +6,7 @@
  */
 /dts-v1/;
 #include "meson-sc2.dtsi"
+#include <dt-bindings/leds/common.h>
 
 / {
 	model = "HK1 RBOX X4 (S905X4, 4GB)";
@@ -25,6 +26,16 @@
 	memory@0 {
 		device_type = "memory";
 		reg = <0 0 0 0xf0000000>;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		led-status {
+			function = LED_FUNCTION_STATUS;
+			gpios = <&gpio GPIOD_11 GPIO_ACTIVE_HIGH>;
+			default-state = "on";
+		};
 	};
 
 	reserved-memory {
