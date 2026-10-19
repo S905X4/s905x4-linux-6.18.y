@@ -1,0 +1,115 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * HK1 RBOX X4, S905X4, 4GB variant.
+ * Wiring and usable-memory boundary: original sc2_ah212_4g vendor DT.
+ * This intentionally leaves CPU DVFS, Wi-Fi, display and media unmodelled.
+ */
+/dts-v1/;
+#include "meson-sc2.dtsi"
+
+/ {
+	model = "HK1 RBOX X4 (S905X4, 4GB)";
+	compatible = "hk1,rbox-x4", "amlogic,sc2";
+
+	aliases {
+		serial0 = &uart_b;
+		mmc0 = &sd_emmc_b;
+		ethernet0 = &ethmac;
+	};
+
+	chosen {
+		stdout-path = "serial0:921600n8";
+	};
+
+	/* The original 4GB DT exposes 0xf0000000 bytes below the MMIO hole. */
+	memory@0 {
+		device_type = "memory";
+		reg = <0 0 0 0xf0000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		/* Low firmware and BL31 carveouts retained from the SC2 port. */
+		firmware@0 {
+			reg = <0 0 0 0x1000000>;
+			no-map;
+		};
+
+		/* Stock secmon alloc-ranges: never make secure memory reusable. */
+		secmon@5000000 {
+			reg = <0 0x05000000 0 0x03400000>;
+			no-map;
+		};
+
+		secmon@10000000 {
+			reg = <0 0x10000000 0 0x00200000>;
+			no-map;
+		};
+
+		/* Stock fixed DSP/scanout pools: firmware ownership is unverified. */
+		dsp-firmware@30000000 {
+			reg = <0 0x30000000 0 0x00800000>;
+			no-map;
+		};
+
+		framebuffer@df800000 {
+			reg = <0 0xdf800000 0 0x00800000>;
+			no-map;
+		};
+		/* Stock ramoops@7400000 overlaps secmon; do not map it here. */
+	};
+};
+
+&uart_b {
+	status = "okay";
+};
+
+&sd_emmc_b {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&sdcard_pins>;
+	bus-width = <4>;
+	cap-sd-highspeed;
+	max-frequency = <50000000>;
+	no-1-8-v;
+	disable-wp;
+	cd-gpios = <&gpio GPIOC_6 GPIO_ACTIVE_LOW>;
+};
+
+&ethmac {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&eth_pins>;
+	phy-mode = "rgmii";
+	phy-handle = <&external_phy>;
+	amlogic,tx-delay-ns = <2>;
+};
+
+&mdio_mux {
+	status = "okay";
+};
+
+&ext_mdio {
+	external_phy: ethernet-phy@0 {
+		reg = <0>;
+		max-speed = <1000>;
+		reset-gpios = <&gpio GPIOZ_15 (GPIO_ACTIVE_LOW | GPIO_OPEN_DRAIN)>;
+		reset-assert-us = <20000>;
+		reset-deassert-us = <50000>;
+		/* Use PHY polling; vendor IRQ 0x154 is not a GPIO binding index. */
+	};
+};
+
+&usb {
+	status = "okay";
+};
+
+&dwc3 {
+	/* Preserve the original board DT's limit, not an assumed USB3 result. */
+	maximum-speed = "high-speed";
+	snps,dis_enblslpm_quirk;
+	snps,dis-u2-freeclk-exists-quirk;
+};

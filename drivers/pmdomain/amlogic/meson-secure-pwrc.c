@@ -13,6 +13,7 @@
 #include <dt-bindings/power/meson-a1-power.h>
 #include <dt-bindings/power/amlogic,c3-pwrc.h>
 #include <dt-bindings/power/meson-s4-power.h>
+#include <dt-bindings/power/meson-sc2-power.h>
 #include <dt-bindings/power/amlogic,t7-pwrc.h>
 #include <dt-bindings/power/amlogic,a4-pwrc.h>
 #include <dt-bindings/power/amlogic,a5-pwrc.h>
@@ -190,6 +191,21 @@ static const struct meson_secure_pwrc_domain_desc c3_pwrc_domains[] = {
 	SEC_PD(C3_ISP_TOP,	0),
 	SEC_PD(C3_MIPI_ISP_WRAP, 0),
 	SEC_PD(C3_VCODEC,	0),
+};
+
+static const struct meson_secure_pwrc_domain_desc sc2_pwrc_domains[] = {
+	SEC_PD(SC2_DSP,		0),
+	SEC_PD(SC2_DOS_HCODEC,	0),
+	SEC_PD(SC2_DOS_HEVC,	0),
+	SEC_PD(SC2_DOS_VDEC,	0),
+	SEC_PD(SC2_DOS_WAVE,	0),
+	SEC_PD(SC2_VPU_HDMI,	0),
+	/* Keep the shared USB fabric powered, as in the vendor driver. */
+	SEC_PD(SC2_USB_COMB,	GENPD_FLAG_ALWAYS_ON),
+	SEC_PD(SC2_PCIE,		0),
+	SEC_PD(SC2_GE2D,		0),
+	SEC_PD(SC2_ETH,		GENPD_FLAG_ALWAYS_ON),
+	SEC_PD(SC2_AUDIO,		0),
 };
 
 static const struct meson_secure_pwrc_domain_desc s4_pwrc_domains[] = {
@@ -430,6 +446,11 @@ static const struct meson_secure_pwrc_domain_data amlogic_secure_c3_pwrc_data = 
 	.count = ARRAY_SIZE(c3_pwrc_domains),
 };
 
+static const struct meson_secure_pwrc_domain_data meson_secure_sc2_pwrc_data = {
+	.domains = sc2_pwrc_domains,
+	.count = ARRAY_SIZE(sc2_pwrc_domains),
+};
+
 static const struct meson_secure_pwrc_domain_data meson_secure_s4_pwrc_data = {
 	.domains = s4_pwrc_domains,
 	.count = ARRAY_SIZE(s4_pwrc_domains),
@@ -456,6 +477,10 @@ static const struct meson_secure_pwrc_domain_data amlogic_secure_t7_pwrc_data = 
 };
 
 static const struct of_device_id meson_secure_pwrc_match_table[] = {
+	{
+		.compatible = "amlogic,meson-sc2-pwrc",
+		.data = &meson_secure_sc2_pwrc_data,
+	},
 	{
 		.compatible = "amlogic,meson-a1-pwrc",
 		.data = &meson_secure_a1_pwrc_data,

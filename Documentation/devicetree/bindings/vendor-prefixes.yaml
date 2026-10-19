@@ -693,6 +693,8 @@ patternProperties:
     description: Hitachi Ltd.
   "^hitex,.*":
     description: Hitex Development Tools
+  "^hk1,.*":
+    description: HK1 TV boxes
   "^holt,.*":
     description: Holt Integrated Circuits, Inc.
   "^holtek,.*":

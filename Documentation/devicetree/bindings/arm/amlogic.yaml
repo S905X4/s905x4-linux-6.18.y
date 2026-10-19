@@ -240,6 +240,11 @@ properties:
               - amlogic,aw419
           - const: amlogic,c3
 
+      - description: HK1 RBOX X4 with the Amlogic SC2 S905X4 SoC
+        items:
+          - const: hk1,rbox-x4
+          - const: amlogic,sc2
+
       - description: Boards with the Amlogic Meson S4 S805X2 SoC
         items:
           - enum:
