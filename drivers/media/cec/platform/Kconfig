@@ -33,9 +33,9 @@ config CEC_MESON_G12A_AO
 	select CEC_CORE
 	select CEC_NOTIFIER
 	help
-	  This is a driver for Amlogic Meson G12A SoCs AO CEC interface.
-	  This driver if for the new AO-CEC module found in G12A SoCs,
-	  usually named AO_CEC_B in documentation.
+	  This is a driver for Amlogic Meson G12A, SM1 and SC2 CEC interfaces.
+	  It supports the AO_CEC_B module, including the external clock divider
+	  used by SC2.
 	  It uses the generic CEC framework interface.
 	  CEC bus is present in the HDMI connector and enables communication
 	  between compatible devices.

@@ -171,6 +171,9 @@
 struct meson_ao_cec_g12a_data {
 	/* Setup the internal CECB_CTRL2 register */
 	bool				ctrl2_setup;
+	/* SC2 moved the divider to the clock controller. */
+	bool				external_clock;
+	u32				reg_offset;
 };
 
 struct meson_ao_cec_g12a_device {
@@ -670,7 +673,8 @@ static int meson_ao_cec_g12a_probe(struct platform_device *pdev)
 		goto out_probe_adapter;
 	}
 
-	ao_cec->regmap = devm_regmap_init_mmio(&pdev->dev, base,
+	ao_cec->regmap = devm_regmap_init_mmio(&pdev->dev,
+					       base + ao_cec->data->reg_offset,
 					       &meson_ao_cec_g12a_regmap_conf);
 	if (IS_ERR(ao_cec->regmap)) {
 		ret = PTR_ERR(ao_cec->regmap);
@@ -694,16 +698,24 @@ static int meson_ao_cec_g12a_probe(struct platform_device *pdev)
 		goto out_probe_adapter;
 	}
 
-	ao_cec->oscin = devm_clk_get(&pdev->dev, "oscin");
-	if (IS_ERR(ao_cec->oscin)) {
-		dev_err(&pdev->dev, "oscin clock request failed\n");
-		ret = PTR_ERR(ao_cec->oscin);
-		goto out_probe_adapter;
-	}
+	if (ao_cec->data->external_clock) {
+		ao_cec->core = devm_clk_get(&pdev->dev, "core");
+		if (IS_ERR(ao_cec->core)) {
+			ret = PTR_ERR(ao_cec->core);
+			goto out_probe_adapter;
+		}
+	} else {
+		ao_cec->oscin = devm_clk_get(&pdev->dev, "oscin");
+		if (IS_ERR(ao_cec->oscin)) {
+			dev_err(&pdev->dev, "oscin clock request failed\n");
+			ret = PTR_ERR(ao_cec->oscin);
+			goto out_probe_adapter;
+		}
 
-	ret = meson_ao_cec_g12a_setup_clk(ao_cec);
-	if (ret)
-		goto out_probe_adapter;
+		ret = meson_ao_cec_g12a_setup_clk(ao_cec);
+		if (ret)
+			goto out_probe_adapter;
+	}
 
 	ret = clk_prepare_enable(ao_cec->core);
 	if (ret) {
@@ -764,6 +776,13 @@ static const struct meson_ao_cec_g12a_data ao_cec_sm1_data = {
 	.ctrl2_setup = true,
 };
 
+static const struct meson_ao_cec_g12a_data ao_cec_sc2_data = {
+	.ctrl2_setup = true,
+	.external_clock = true,
+	/* CECB_GEN_CNTL is at 0x40 instead of 0x08. */
+	.reg_offset = 0x38,
+};
+
 static const struct of_device_id meson_ao_cec_g12a_of_match[] = {
 	{
 		.compatible = "amlogic,meson-g12a-ao-cec",
@@ -772,6 +791,10 @@ static const struct of_device_id meson_ao_cec_g12a_of_match[] = {
 	{
 		.compatible = "amlogic,meson-sm1-ao-cec",
 		.data = &ao_cec_sm1_data,
+	},
+	{
+		.compatible = "amlogic,meson-sc2-ao-cec",
+		.data = &ao_cec_sc2_data,
 	},
 	{ /* sentinel */ }
 };
