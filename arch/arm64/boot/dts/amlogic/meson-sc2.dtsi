@@ -186,6 +186,77 @@
 			};
 		};
 
+		canvas: video-lut@fe036048 {
+			compatible = "amlogic,canvas";
+			reg = <0 0xfe036048 0 0x14>;
+		};
+
+		vpu: vpu@ff000000 {
+			compatible = "amlogic,meson-sc2-vpu";
+			reg = <0 0xff000000 0 0x40000>,
+			      <0 0xfe000000 0 0x49c>,
+			      <0 0xfe008000 0 0x400>,
+			      <0 0xfe00c000 0 0x800>;
+			reg-names = "vpu", "clkctrl", "anactrl", "pwrctrl";
+			interrupts = <GIC_SPI 197 IRQ_TYPE_EDGE_RISING>;
+			power-domains = <&pwrc PWRC_SC2_VPU_HDMI_ID>;
+			clocks = <&clkc CLKID_VPU>, <&clkc CLKID_VAPB>,
+				 <&clkc CLKID_VPU_INTR>;
+			clock-names = "vpu", "vapb", "intr";
+			assigned-clocks = <&clkc CLKID_VPU_0_MUX>, <&clkc CLKID_VPU_0>,
+					  <&clkc CLKID_VPU>, <&clkc CLKID_VAPB_0_MUX>,
+					  <&clkc CLKID_VAPB_0>, <&clkc CLKID_VAPB>;
+			assigned-clock-parents = <&clkc CLKID_FCLK_DIV3>, <0>,
+						 <&clkc CLKID_VPU_0>, <&clkc CLKID_FCLK_DIV4>,
+						 <0>, <&clkc CLKID_VAPB_0>;
+			assigned-clock-rates = <0>, <666666667>, <0>, <0>, <250000000>, <0>;
+			amlogic,canvas = <&canvas>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+
+			port@1 {
+				reg = <1>;
+				hdmi_tx_out: endpoint {
+					remote-endpoint = <&hdmi_tx_in>;
+				};
+			};
+		};
+
+		hdmi_tx: hdmi-tx@fe308000 {
+			compatible = "amlogic,meson-sc2-dw-hdmi";
+			reg = <0 0xfe308000 0 0x8000>, <0 0xfe300000 0 0x8000>;
+			reg-names = "dwc", "top";
+			interrupts = <GIC_SPI 204 IRQ_TYPE_EDGE_RISING>;
+			clocks = <&clkc CLKID_HDMI>, <&clkc CLKID_HDMITX_APB>,
+				 <&clkc CLKID_CTS_ENCI>;
+			clock-names = "isfr", "iahb", "venci";
+			assigned-clocks = <&clkc CLKID_HDMI_MUX>, <&clkc CLKID_HDMI>;
+			assigned-clock-parents = <&xtal>, <0>;
+			assigned-clock-rates = <0>, <24000000>;
+			resets = <&reset RESET_HDMITX_APB>, <&reset RESET_HDMI_TX>,
+				 <&reset RESET_HDMITXPHY>, <&reset RESET_VID_PLL_DIV>;
+			reset-names = "hdmitx_apb", "hdmitx", "hdmitx_phy", "vid_pll_div";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			#sound-dai-cells = <0>;
+			status = "disabled";
+
+			port@0 {
+				reg = <0>;
+				hdmi_tx_in: endpoint {
+					remote-endpoint = <&hdmi_tx_out>;
+				};
+			};
+
+			port@1 {
+				reg = <1>;
+				hdmi_tx_tmds_out: endpoint {
+					remote-endpoint = <&hdmi_connector_in>;
+				};
+			};
+		};
+
 		ir: ir-receiver@fe084040 {
 			compatible = "amlogic,meson-sc2-ir", "amlogic,meson-gxbb-ir";
 			reg = <0 0xfe084040 0 0x24>;
@@ -302,6 +373,23 @@
 };
 
 &periphs_pinctrl {
+	hdmitx_hpd_pins: hdmitx-hpd-pins {
+		mux {
+			groups = "hdmitx_hpd_in";
+			function = "hdmitx";
+			bias-disable;
+		};
+	};
+
+	hdmitx_ddc_pins: hdmitx-ddc-pins {
+		mux {
+			groups = "hdmitx_sda", "hdmitx_sck";
+			function = "hdmitx";
+			bias-disable;
+			drive-strength-microamp = <3000>;
+		};
+	};
+
 	remote_input_pins: remote-input-pins {
 		mux {
 			groups = "remote_input_d5";

@@ -8,12 +8,14 @@
  *     Jasper St. Pierre <jstpierre@mecheye.net>
  */
 
+#include <linux/clk.h>
 #include <linux/aperture.h>
 #include <linux/component.h>
 #include <linux/module.h>
 #include <linux/of_graph.h>
 #include <linux/sys_soc.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 #include <linux/soc/amlogic/meson-canvas.h>
 
 #include <drm/clients/drm_client_setup.h>
@@ -138,6 +140,17 @@ static void meson_vpu_init(struct meson_drm *priv)
 {
 	u32 value;
 
+	if (priv->sc2) {
+		/* SC2 PWRCTRL memory gates, from Amlogic vpu_mem_pd_sc2. */
+		regmap_update_bits(priv->pwrctrl, 0x54,
+				   GENMASK(11, 0) | GENMASK(15, 14), 0);
+		regmap_update_bits(priv->pwrctrl, 0x58,
+				   GENMASK(21, 14) | GENMASK(25, 24) |
+				   GENMASK(31, 30), 0);
+		regmap_update_bits(priv->pwrctrl, 0x5c, GENMASK(13, 8), 0);
+		regmap_update_bits(priv->pwrctrl, 0x64, GENMASK(13, 12), 0);
+	}
+
 	/*
 	 * Slave dc0 and dc5 connected to master port 1.
 	 * By default other slaves are connected to master port 0.
@@ -212,6 +225,7 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 	priv->dev = dev;
 	priv->compat = match->compat;
 	priv->afbcd.ops = match->afbcd_ops;
+	priv->sc2 = match->sc2;
 
 	regs = devm_platform_ioremap_resource_byname(pdev, "vpu");
 	if (IS_ERR(regs)) {
@@ -221,7 +235,8 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 
 	priv->io_base = regs;
 
-	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "hhi");
+	res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
+					   priv->sc2 ? "clkctrl" : "hhi");
 	if (!res) {
 		ret = -EINVAL;
 		goto free_drm;
@@ -240,6 +255,41 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 		ret = PTR_ERR(priv->hhi);
 		goto free_drm;
 	}
+	priv->analog = priv->hhi;
+	if (priv->sc2) {
+		static const char * const banks[] = { "anactrl", "pwrctrl" };
+		static const char * const clocks[] = { "vpu", "vapb", "intr" };
+		struct regmap **maps[] = { &priv->analog, &priv->pwrctrl };
+
+		for (i = 0; i < ARRAY_SIZE(banks); i++) {
+			res = platform_get_resource_byname(pdev, IORESOURCE_MEM,
+							   banks[i]);
+			if (!res) {
+				ret = -EINVAL;
+				goto free_drm;
+			}
+			regs = devm_ioremap(dev, res->start, resource_size(res));
+			if (!regs) {
+				ret = -ENOMEM;
+				goto free_drm;
+			}
+			*maps[i] = devm_regmap_init_mmio(dev, regs,
+							 &meson_regmap_config);
+			if (IS_ERR(*maps[i])) {
+				ret = PTR_ERR(*maps[i]);
+				goto free_drm;
+			}
+		}
+		for (i = 0; i < ARRAY_SIZE(clocks); i++) {
+			struct clk *clk = devm_clk_get_enabled(dev, clocks[i]);
+
+			if (IS_ERR(clk)) {
+				ret = PTR_ERR(clk);
+				goto free_drm;
+			}
+		}
+	}
+
 
 	priv->canvas = meson_canvas_get(dev);
 	if (IS_ERR(priv->canvas)) {
@@ -322,7 +372,7 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 	if (ret)
 		goto exit_afbcd;
 
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
+	if (!priv->sc2 && meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
 		ret = meson_encoder_dsi_probe(priv);
 		if (ret)
 			goto exit_afbcd;
@@ -471,8 +521,14 @@ static const struct of_device_id components_dev_match[] = {
 	{ .compatible = "amlogic,meson-gxl-dw-hdmi" },
 	{ .compatible = "amlogic,meson-gxm-dw-hdmi" },
 	{ .compatible = "amlogic,meson-g12a-dw-hdmi" },
+	{ .compatible = "amlogic,meson-sc2-dw-hdmi" },
 	{}
 };
+
+static void meson_drv_power_put(void *data)
+{
+	pm_runtime_put_sync(data);
+}
 
 static int meson_drv_probe(struct platform_device *pdev)
 {
@@ -504,6 +560,21 @@ static int meson_drv_probe(struct platform_device *pdev)
 		return meson_drv_bind_master(&pdev->dev, false);
 
 	/* If some endpoints were found, initialize the nodes */
+	if (count && of_device_is_compatible(np, "amlogic,meson-sc2-vpu")) {
+		int ret;
+
+		ret = devm_pm_runtime_enable(&pdev->dev);
+		if (ret)
+			return ret;
+		ret = pm_runtime_resume_and_get(&pdev->dev);
+		if (ret < 0)
+			return ret;
+		ret = devm_add_action_or_reset(&pdev->dev, meson_drv_power_put,
+					       &pdev->dev);
+		if (ret)
+			return ret;
+	}
+
 	if (count) {
 		dev_info(&pdev->dev, "Queued %d outputs on vpu\n", count);
 
@@ -539,6 +610,12 @@ static struct meson_drm_match_data meson_drm_g12a_data = {
 	.afbcd_ops = &meson_afbcd_g12a_ops,
 };
 
+static struct meson_drm_match_data meson_drm_sc2_data = {
+	.compat = VPU_COMPATIBLE_G12A,
+	.afbcd_ops = &meson_afbcd_g12a_ops,
+	.sc2 = true,
+};
+
 static const struct of_device_id dt_match[] = {
 	{ .compatible = "amlogic,meson-gxbb-vpu",
 	  .data       = (void *)&meson_drm_gxbb_data },
@@ -548,6 +625,8 @@ static const struct of_device_id dt_match[] = {
 	  .data       = (void *)&meson_drm_gxm_data },
 	{ .compatible = "amlogic,meson-g12a-vpu",
 	  .data       = (void *)&meson_drm_g12a_data },
+	{ .compatible = "amlogic,meson-sc2-vpu",
+	  .data       = (void *)&meson_drm_sc2_data },
 	{}
 };
 MODULE_DEVICE_TABLE(of, dt_match);

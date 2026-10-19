@@ -34,6 +34,8 @@ enum {
 struct meson_drm_match_data {
 	enum vpu_compatible compat;
 	struct meson_afbcd_ops *afbcd_ops;
+	/* SC2 retains the G12A VIU/VPP layout, but splits the HHI banks. */
+	bool sc2;
 };
 
 struct meson_drm_soc_limits {
@@ -45,6 +47,10 @@ struct meson_drm {
 	enum vpu_compatible compat;
 	void __iomem *io_base;
 	struct regmap *hhi;
+	struct regmap *analog;
+	struct regmap *pwrctrl;
+	bool sc2;
+	bool hdmi_pll_locked;
 	int vsync_irq;
 
 	struct meson_canvas *canvas;

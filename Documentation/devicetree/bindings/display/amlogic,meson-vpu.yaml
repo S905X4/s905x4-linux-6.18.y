@@ -55,6 +55,12 @@ description: |
   The ENCI is connected to a single VDAC for Composite Output.
   The ENCI and ENCP are connected to an on-chip HDMI Transceiver.
 
+  SC2 retains the G12A scanout and blending pipeline. Its video clocks,
+  analog PLL/PHY and memory power controls reside in three separate banks
+  (CLKCTRL, ANACTRL and PWRCTRL), rather than the single HHI bank. The VPU
+  domain is controlled by secure firmware; clocks must be enabled before
+  accessing the pipeline. HDMI is the only output currently supported on SC2.
+
 properties:
   compatible:
     oneOf:
@@ -66,14 +72,24 @@ properties:
           - const: amlogic,meson-gx-vpu
       - enum:
           - amlogic,meson-g12a-vpu # G12A (S905X2, S905Y2, S905D2)
+          - amlogic,meson-sc2-vpu # SC2 (S905X4)
 
   reg:
-    maxItems: 2
+    minItems: 2
+    maxItems: 4
 
   reg-names:
+    minItems: 2
+    maxItems: 4
+
+  clocks:
+    maxItems: 3
+
+  clock-names:
     items:
       - const: vpu
-      - const: hhi
+      - const: vapb
+      - const: intr
 
   interrupts:
     maxItems: 1
@@ -111,11 +127,46 @@ required:
   - compatible
   - reg
   - interrupts
-  - port@0
   - port@1
   - "#address-cells"
   - "#size-cells"
   - amlogic,canvas
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: amlogic,meson-sc2-vpu
+    then:
+      properties:
+        reg:
+          minItems: 4
+        reg-names:
+          items:
+            - const: vpu
+            - const: clkctrl
+            - const: anactrl
+            - const: pwrctrl
+        clocks:
+          minItems: 3
+        port@0: false
+        port@2: false
+      required:
+        - reg-names
+        - clocks
+        - clock-names
+        - power-domains
+    else:
+      properties:
+        reg:
+          maxItems: 2
+        reg-names:
+          items:
+            - const: vpu
+            - const: hhi
+      required:
+        - port@0
 
 additionalProperties: false
 

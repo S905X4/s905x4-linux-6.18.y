@@ -22,6 +22,17 @@
 		stdout-path = "serial0:921600n8";
 	};
 
+	hdmi-connector {
+		compatible = "hdmi-connector";
+		type = "a";
+
+		port {
+			hdmi_connector_in: endpoint {
+				remote-endpoint = <&hdmi_tx_tmds_out>;
+			};
+		};
+	};
+
 	/* The original 4GB DT exposes 0xf0000000 bytes below the MMIO hole. */
 	memory@0 {
 		device_type = "memory";
@@ -133,6 +144,16 @@
 
 &uart_b {
 	status = "okay";
+};
+
+&vpu {
+	status = "okay";
+};
+
+&hdmi_tx {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&hdmitx_hpd_pins>, <&hdmitx_ddc_pins>;
 };
 
 &ir {

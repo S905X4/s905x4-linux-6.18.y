@@ -12,6 +12,29 @@ maintainers:
 
 allOf:
   - $ref: /schemas/sound/dai-common.yaml#
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: amlogic,meson-sc2-dw-hdmi
+    then:
+      properties:
+        reg:
+          minItems: 2
+        resets:
+          minItems: 4
+        reset-names:
+          minItems: 4
+      required:
+        - reg-names
+    else:
+      properties:
+        reg:
+          maxItems: 1
+        resets:
+          maxItems: 3
+        reset-names:
+          maxItems: 3
 
 description: |
   The Amlogic Meson Synopsys Designware Integration is composed of
@@ -44,6 +67,12 @@ description: |
   HDMI TX IP version 2.01a with HDCP and I2C & S/PDIF
   audio source interfaces.
 
+  SC2 uses the HDMI 2.0 TMDS controller, not the HDMI 2.1 FRL controller.
+  DWC and TOP have separate direct MMIO windows; TOP precedes DWC in the
+  physical address map. The PHY and PLL are in ANACTRL, and the HDMI system
+  and pixel clocks are in CLKCTRL. Resetting the video PLL divider is also
+  required on SC2. Its PHY analog settings differ from G12A.
+
 properties:
   compatible:
     oneOf:
@@ -55,9 +84,16 @@ properties:
           - const: amlogic,meson-gx-dw-hdmi
       - enum:
           - amlogic,meson-g12a-dw-hdmi # G12A (S905X2, S905Y2, S905D2)
+          - amlogic,meson-sc2-dw-hdmi # SC2 (S905X4)
 
   reg:
-    maxItems: 1
+    minItems: 1
+    maxItems: 2
+
+  reg-names:
+    items:
+      - const: dwc
+      - const: top
 
   interrupts:
     maxItems: 1
@@ -77,12 +113,15 @@ properties:
 
   resets:
     minItems: 3
+    maxItems: 4
 
   reset-names:
+    minItems: 3
     items:
       - const: hdmitx_apb
       - const: hdmitx
       - const: hdmitx_phy
+      - const: vid_pll_div
 
   hdmi-supply:
     description: phandle to an external 5V regulator to power the HDMI logic

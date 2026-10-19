@@ -141,10 +141,12 @@ struct meson_dw_hdmi {
 	struct meson_drm *priv;
 	struct device *dev;
 	void __iomem *hdmitx;
+	void __iomem *top;
 	const struct meson_dw_hdmi_data *data;
 	struct reset_control *hdmitx_apb;
 	struct reset_control *hdmitx_ctrl;
 	struct reset_control *hdmitx_phy;
+	struct reset_control *vid_pll_div;
 	u32 irq_stat;
 	struct dw_hdmi *hdmi;
 	struct drm_bridge *bridge;
@@ -182,7 +184,7 @@ static unsigned int dw_hdmi_top_read(struct meson_dw_hdmi *dw_hdmi,
 static unsigned int dw_hdmi_g12a_top_read(struct meson_dw_hdmi *dw_hdmi,
 					  unsigned int addr)
 {
-	return readl(dw_hdmi->hdmitx + HDMITX_TOP_G12A_OFFSET + (addr << 2));
+	return readl(dw_hdmi->top + (addr << 2));
 }
 
 static inline void dw_hdmi_top_write(struct meson_dw_hdmi *dw_hdmi,
@@ -205,7 +207,7 @@ static inline void dw_hdmi_top_write(struct meson_dw_hdmi *dw_hdmi,
 static inline void dw_hdmi_g12a_top_write(struct meson_dw_hdmi *dw_hdmi,
 					  unsigned int addr, unsigned int data)
 {
-	writel(data, dw_hdmi->hdmitx + HDMITX_TOP_G12A_OFFSET + (addr << 2));
+	writel(data, dw_hdmi->top + (addr << 2));
 }
 
 /* Helper to change specific bits in PHY registers */
@@ -274,6 +276,19 @@ static inline void dw_hdmi_g12a_dwc_write(struct meson_dw_hdmi *dw_hdmi,
 
 /* Bridge */
 
+/* SC2 moved HDMIPHY CTRL0..5 to ANACTRL 0x200..0x214. */
+static void meson_hdmi_phy_write(struct meson_drm *priv, unsigned int reg,
+				 unsigned int val)
+{
+	regmap_write(priv->analog, priv->sc2 ? reg - 0x1a0 : reg, val);
+}
+
+static void meson_hdmi_phy_update_bits(struct meson_drm *priv, unsigned int reg,
+				       unsigned int mask, unsigned int val)
+{
+	regmap_update_bits(priv->analog, priv->sc2 ? reg - 0x1a0 : reg, mask, val);
+}
+
 /* Setup PHY bandwidth modes */
 static void meson_hdmi_phy_setup_mode(struct meson_dw_hdmi *dw_hdmi,
 				      const struct drm_display_mode *mode,
@@ -284,58 +299,73 @@ static void meson_hdmi_phy_setup_mode(struct meson_dw_hdmi *dw_hdmi,
 
 	/* For 420, pixel clock is half unlike venc clock */
 	if (mode_is_420) pixel_clock /= 2;
+	if (priv->sc2) {
+		/* Amlogic hw_sc2.c: program drive strength after PHY reset. */
+		u32 ctrl0 = 0x33eb4252;
+
+		if (pixel_clock >= 371250)
+			ctrl0 = 0x37eb65c4;
+		else if (pixel_clock >= 297000)
+			ctrl0 = 0x33eb42a2;
+		meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL5,
+				     pixel_clock >= 371250 ? 0x80b : 3);
+		meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL0, ctrl0);
+		meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL3, 0x2ab0ff3b);
+		return;
+	}
+
 
 	if (dw_hdmi_is_compatible(dw_hdmi, "amlogic,meson-gxl-dw-hdmi") ||
 	    dw_hdmi_is_compatible(dw_hdmi, "amlogic,meson-gxm-dw-hdmi")) {
 		if (pixel_clock >= 371250) {
 			/* 5.94Gbps, 3.7125Gbps */
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL0, 0x333d3282);
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL3, 0x2136315b);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL0, 0x333d3282);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL3, 0x2136315b);
 		} else if (pixel_clock >= 297000) {
 			/* 2.97Gbps */
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL0, 0x33303382);
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL3, 0x2036315b);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL0, 0x33303382);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL3, 0x2036315b);
 		} else if (pixel_clock >= 148500) {
 			/* 1.485Gbps */
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL0, 0x33303362);
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL3, 0x2016315b);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL0, 0x33303362);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL3, 0x2016315b);
 		} else {
 			/* 742.5Mbps, and below */
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL0, 0x33604142);
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL3, 0x0016315b);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL0, 0x33604142);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL3, 0x0016315b);
 		}
 	} else if (dw_hdmi_is_compatible(dw_hdmi,
 					 "amlogic,meson-gxbb-dw-hdmi")) {
 		if (pixel_clock >= 371250) {
 			/* 5.94Gbps, 3.7125Gbps */
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL0, 0x33353245);
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL3, 0x2100115b);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL0, 0x33353245);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL3, 0x2100115b);
 		} else if (pixel_clock >= 297000) {
 			/* 2.97Gbps */
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL0, 0x33634283);
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL3, 0xb000115b);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL0, 0x33634283);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL3, 0xb000115b);
 		} else {
 			/* 1.485Gbps, and below */
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL0, 0x33632122);
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL3, 0x2000115b);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL0, 0x33632122);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL3, 0x2000115b);
 		}
 	} else if (dw_hdmi_is_compatible(dw_hdmi,
 					 "amlogic,meson-g12a-dw-hdmi")) {
 		if (pixel_clock >= 371250) {
 			/* 5.94Gbps, 3.7125Gbps */
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL0, 0x37eb65c4);
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL3, 0x2ab0ff3b);
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL5, 0x0000080b);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL0, 0x37eb65c4);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL3, 0x2ab0ff3b);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL5, 0x0000080b);
 		} else if (pixel_clock >= 297000) {
 			/* 2.97Gbps */
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL0, 0x33eb6262);
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL3, 0x2ab0ff3b);
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL5, 0x00000003);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL0, 0x33eb6262);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL3, 0x2ab0ff3b);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL5, 0x00000003);
 		} else {
 			/* 1.485Gbps, and below */
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL0, 0x33eb4242);
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL3, 0x2ab0ff3b);
-			regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL5, 0x00000003);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL0, 0x33eb4242);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL3, 0x2ab0ff3b);
+			meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL5, 0x00000003);
 		}
 	}
 }
@@ -345,12 +375,12 @@ static inline void meson_dw_hdmi_phy_reset(struct meson_dw_hdmi *dw_hdmi)
 	struct meson_drm *priv = dw_hdmi->priv;
 
 	/* Enable and software reset */
-	regmap_update_bits(priv->hhi, HHI_HDMI_PHY_CNTL1, 0xf, 0xf);
+	meson_hdmi_phy_update_bits(priv, HHI_HDMI_PHY_CNTL1, 0xf, 0xf);
 
 	mdelay(2);
 
 	/* Enable and unreset */
-	regmap_update_bits(priv->hhi, HHI_HDMI_PHY_CNTL1, 0xf, 0xe);
+	meson_hdmi_phy_update_bits(priv, HHI_HDMI_PHY_CNTL1, 0xf, 0xe);
 
 	mdelay(2);
 }
@@ -365,6 +395,9 @@ static int dw_hdmi_phy_init(struct dw_hdmi *hdmi, void *data,
 	unsigned int wr_clk =
 		readl_relaxed(priv->io_base + _REG(VPU_HDMI_SETTING));
 	bool mode_is_420 = false;
+
+	if (priv->sc2 && !priv->hdmi_pll_locked)
+		return -EIO;
 
 	DRM_DEBUG_DRIVER("\"%s\" div%d\n", mode->name,
 			 mode->clock > 340000 ? 40 : 10);
@@ -393,10 +426,11 @@ static int dw_hdmi_phy_init(struct dw_hdmi *hdmi, void *data,
 	dw_hdmi->data->top_write(dw_hdmi, HDMITX_TOP_TMDS_CLK_PTTN_CNTL, 0x2);
 
 	/* Setup PHY parameters */
-	meson_hdmi_phy_setup_mode(dw_hdmi, mode, mode_is_420);
+	if (!priv->sc2)
+		meson_hdmi_phy_setup_mode(dw_hdmi, mode, mode_is_420);
 
 	/* Disable clock, fifo, fifo_wr */
-	regmap_update_bits(priv->hhi, HHI_HDMI_PHY_CNTL1, 0xf, 0);
+	meson_hdmi_phy_update_bits(priv, HHI_HDMI_PHY_CNTL1, 0xf, 0);
 
 	dw_hdmi_set_high_tmds_clock_ratio(hdmi, display);
 
@@ -406,6 +440,9 @@ static int dw_hdmi_phy_init(struct dw_hdmi *hdmi, void *data,
 	meson_dw_hdmi_phy_reset(dw_hdmi);
 	meson_dw_hdmi_phy_reset(dw_hdmi);
 	meson_dw_hdmi_phy_reset(dw_hdmi);
+	if (priv->sc2)
+		meson_hdmi_phy_setup_mode(dw_hdmi, mode, mode_is_420);
+
 
 	/* Temporary Disable VENC video stream */
 	if (priv->venc.hdmi_use_enci)
@@ -449,8 +486,8 @@ static void dw_hdmi_phy_disable(struct dw_hdmi *hdmi,
 	DRM_DEBUG_DRIVER("\n");
 
 	/* Fallback to init mode */
-	regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL1, dw_hdmi->data->cntl1_init);
-	regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL0, dw_hdmi->data->cntl0_init);
+	meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL1, dw_hdmi->data->cntl1_init);
+	meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL0, dw_hdmi->data->cntl0_init);
 }
 
 static enum drm_connector_status dw_hdmi_read_hpd(struct dw_hdmi *hdmi,
@@ -599,16 +636,26 @@ static void meson_dw_hdmi_init(struct meson_dw_hdmi *meson_dw_hdmi)
 {
 	struct meson_drm *priv = meson_dw_hdmi->priv;
 
-	/* Enable clocks */
-	regmap_update_bits(priv->hhi, HHI_HDMI_CLK_CNTL, 0xffff, 0x100);
-
-	/* Bring HDMITX MEM output of power down */
-	regmap_update_bits(priv->hhi, HHI_MEM_PD_REG0, 0xff << 8, 0);
+	if (priv->sc2) {
+		regmap_update_bits(priv->pwrctrl, 0x6c, GENMASK(15, 8), 0);
+		meson_hdmi_phy_update_bits(priv, HHI_HDMI_PHY_CNTL3, 3, 3);
+	} else {
+		/* Enable clocks and bring HDMITX memory out of power down. */
+		regmap_update_bits(priv->hhi, HHI_HDMI_CLK_CNTL, 0xffff, 0x100);
+		regmap_update_bits(priv->hhi, HHI_MEM_PD_REG0, 0xff << 8, 0);
+	}
 
 	/* Reset HDMITX APB & TX & PHY */
-	reset_control_reset(meson_dw_hdmi->hdmitx_apb);
-	reset_control_reset(meson_dw_hdmi->hdmitx_ctrl);
-	reset_control_reset(meson_dw_hdmi->hdmitx_phy);
+	if (priv->sc2) {
+		reset_control_reset(meson_dw_hdmi->hdmitx_ctrl);
+		reset_control_reset(meson_dw_hdmi->hdmitx_phy);
+		reset_control_reset(meson_dw_hdmi->vid_pll_div);
+		reset_control_reset(meson_dw_hdmi->hdmitx_apb);
+	} else {
+		reset_control_reset(meson_dw_hdmi->hdmitx_apb);
+		reset_control_reset(meson_dw_hdmi->hdmitx_ctrl);
+		reset_control_reset(meson_dw_hdmi->hdmitx_phy);
+	}
 
 	/* Enable APB3 fail on error */
 	if (!meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
@@ -631,8 +678,8 @@ static void meson_dw_hdmi_init(struct meson_dw_hdmi *meson_dw_hdmi)
 	meson_dw_hdmi->data->top_write(meson_dw_hdmi, HDMITX_TOP_BIST_CNTL, BIT(12));
 
 	/* Setup PHY */
-	regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL1, meson_dw_hdmi->data->cntl1_init);
-	regmap_write(priv->hhi, HHI_HDMI_PHY_CNTL0, meson_dw_hdmi->data->cntl0_init);
+	meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL1, meson_dw_hdmi->data->cntl1_init);
+	meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL0, meson_dw_hdmi->data->cntl0_init);
 
 	/* Enable HDMI-TX Interrupt */
 	meson_dw_hdmi->data->top_write(meson_dw_hdmi, HDMITX_TOP_INTR_STAT_CLR,
@@ -720,10 +767,24 @@ static int meson_dw_hdmi_bind(struct device *dev, struct device *master,
 		dev_err(dev, "Failed to get hdmitx_phy reset\n");
 		return PTR_ERR(meson_dw_hdmi->hdmitx_phy);
 	}
+	if (priv->sc2) {
+		meson_dw_hdmi->vid_pll_div =
+			devm_reset_control_get_exclusive(dev, "vid_pll_div");
+		if (IS_ERR(meson_dw_hdmi->vid_pll_div))
+			return PTR_ERR(meson_dw_hdmi->vid_pll_div);
+	}
+
 
 	meson_dw_hdmi->hdmitx = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(meson_dw_hdmi->hdmitx))
 		return PTR_ERR(meson_dw_hdmi->hdmitx);
+	meson_dw_hdmi->top = meson_dw_hdmi->hdmitx + HDMITX_TOP_G12A_OFFSET;
+	if (priv->sc2) {
+		meson_dw_hdmi->top = devm_platform_ioremap_resource(pdev, 1);
+		if (IS_ERR(meson_dw_hdmi->top))
+			return PTR_ERR(meson_dw_hdmi->top);
+	}
+
 
 	ret = meson_enable_clk(dev, "isfr");
 	if (ret)
@@ -769,7 +830,8 @@ static int meson_dw_hdmi_bind(struct device *dev, struct device *master,
 
 	if (dw_hdmi_is_compatible(meson_dw_hdmi, "amlogic,meson-gxl-dw-hdmi") ||
 	    dw_hdmi_is_compatible(meson_dw_hdmi, "amlogic,meson-gxm-dw-hdmi") ||
-	    dw_hdmi_is_compatible(meson_dw_hdmi, "amlogic,meson-g12a-dw-hdmi"))
+	    dw_hdmi_is_compatible(meson_dw_hdmi, "amlogic,meson-g12a-dw-hdmi") ||
+	    priv->sc2)
 		dw_plat_data->use_drm_infoframe = true;
 
 	platform_set_drvdata(pdev, meson_dw_hdmi);
@@ -849,6 +911,8 @@ static const struct of_device_id meson_dw_hdmi_of_table[] = {
 	{ .compatible = "amlogic,meson-gxm-dw-hdmi",
 	  .data = &meson_dw_hdmi_gxl_data },
 	{ .compatible = "amlogic,meson-g12a-dw-hdmi",
+	  .data = &meson_dw_hdmi_g12a_data },
+	{ .compatible = "amlogic,meson-sc2-dw-hdmi",
 	  .data = &meson_dw_hdmi_g12a_data },
 	{ }
 };
