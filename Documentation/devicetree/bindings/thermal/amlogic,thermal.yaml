@@ -69,7 +69,6 @@ allOf:
     then:
       properties:
         reg:
-          minItems: 2
           items:
             - description: Sensor registers
             - description: Calibrated trim word in the system controller
