@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/clock/amlogic,sc2-clkc.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Amlogic SC2 clock controller
+
+maintainers:
+  - Heiner Kallweit <hkallweit1@gmail.com>
+
+description: |
+  SC2 provides peripheral clocks and PLLs through three register windows.
+  CPU, DSU and protected PLL programming uses the vendor secure firmware
+  clock services (SMC 0x8200009a and 0x8200009b). Clock indices are defined
+  in dt-bindings/clock/amlogic,sc2-clkc.h.
+
+properties:
+  compatible:
+    const: amlogic,sc2-clkc
+
+  reg:
+    items:
+      - description: Peripheral clock registers
+      - description: PLL registers
+      - description: CPU and DSU clock registers
+
+  reg-names:
+    items:
+      - const: basic
+      - const: pll
+      - const: cpu_clk
+
+  clocks:
+    maxItems: 1
+
+  clock-names:
+    const: xtal
+
+  "#clock-cells":
+    const: 1
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - clocks
+  - clock-names
+  - "#clock-cells"
+
+additionalProperties: false
