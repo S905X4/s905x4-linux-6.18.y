@@ -78,6 +78,7 @@ properties:
       - rc-hauppauge
       - rc-hisi-poplar
       - rc-hisi-tv-demo
+      - rc-hk1-rbox-x4
       - rc-imon-mce
       - rc-imon-pad
       - rc-imon-rsc
