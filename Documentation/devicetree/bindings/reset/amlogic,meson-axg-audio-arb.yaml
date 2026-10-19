@@ -18,6 +18,7 @@ properties:
     enum:
       - amlogic,meson-axg-audio-arb
       - amlogic,meson-sm1-audio-arb
+      - amlogic,meson-sc2-audio-arb
 
   reg:
     maxItems: 1

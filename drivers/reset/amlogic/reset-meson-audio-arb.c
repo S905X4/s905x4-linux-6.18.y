@@ -115,6 +115,9 @@ static const struct of_device_id meson_audio_arb_of_match[] = {
 	}, {
 		.compatible = "amlogic,meson-sm1-audio-arb",
 		.data = &sm1_audio_arb_match,
+	}, {
+		.compatible = "amlogic,meson-sc2-audio-arb",
+		.data = &sm1_audio_arb_match,
 	},
 	{}
 };
