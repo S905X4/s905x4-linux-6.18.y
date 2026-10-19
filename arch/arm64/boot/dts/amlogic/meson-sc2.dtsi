@@ -237,9 +237,9 @@
 			};
 		};
 
-		hdmi_tx: hdmi-tx@fe308000 {
+		hdmi_tx: hdmi-tx@fe300000 {
 			compatible = "amlogic,meson-sc2-dw-hdmi";
-			reg = <0 0xfe308000 0 0x8000>, <0 0xfe300000 0 0x8000>;
+			reg = <0 0xfe300000 0 0x8000>, <0 0xfe308000 0 0x8000>;
 			reg-names = "dwc", "top";
 			interrupts = <GIC_SPI 204 IRQ_TYPE_EDGE_RISING>;
 			clocks = <&clkc CLKID_HDMI>, <&clkc CLKID_HDMITX_APB>,

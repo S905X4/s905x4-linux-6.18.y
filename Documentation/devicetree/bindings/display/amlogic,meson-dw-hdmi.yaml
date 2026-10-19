@@ -68,8 +68,8 @@ description: |
   audio source interfaces.
 
   SC2 uses the HDMI 2.0 TMDS controller, not the HDMI 2.1 FRL controller.
-  DWC and TOP have separate direct MMIO windows; TOP precedes DWC in the
-  physical address map. The PHY and PLL are in ANACTRL, and the HDMI system
+  DWC and TOP have separate direct MMIO windows, with TOP 0x8000 bytes
+  above DWC. The PHY and PLL are in ANACTRL, and the HDMI system
   and pixel clocks are in CLKCTRL. Resetting the video PLL divider is also
   required on SC2. Its PHY analog settings differ from G12A.
 
