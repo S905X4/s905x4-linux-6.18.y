@@ -16,6 +16,10 @@ description: |
   DDR sensors share a 500 kHz functional clock but have independent trim
   words. SC2 calibration validity is checked before the thermal zone is
   registered; no uncalibrated temperature estimate is provided.
+  The SC2 driver also programs the calibrated autonomous overtemperature
+  reset at a nominal 110 degrees Celsius, including on resume. This uses
+  the R1P1 rising-code quantization and does not replace the thermal zone's
+  lower software critical trip or CPU cooling policy.
 
 $ref: thermal-sensor.yaml#
 
