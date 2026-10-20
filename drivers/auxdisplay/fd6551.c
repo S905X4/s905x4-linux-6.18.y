@@ -48,6 +48,26 @@ struct fd6551_led {
 	u8 mask;
 };
 
+/*
+ * The HK1 RBOX X4 panel accepts complete writes without driving ACK, as
+ * verified with its FD6551 display. Do not stop before the payload on NAK;
+ * transfer errors and incomplete transfers must still reach the caller.
+ */
+static int fd6551_write(struct i2c_client *client, u8 value)
+{
+	struct i2c_msg msg = {
+		.addr = client->addr,
+		.flags = I2C_M_IGNORE_NAK,
+		.len = 1,
+		.buf = &value,
+	};
+	int ret = i2c_transfer(client->adapter, &msg, 1);
+
+	if (ret < 0)
+		return ret;
+	return ret == 1 ? 0 : -EIO;
+}
+
 /* Byte 0x48 selects display control; intensity zero is the brightest. */
 static int fd6551_brightness_set(struct led_classdev *cdev,
 			       enum led_brightness brightness)
@@ -57,7 +77,7 @@ static int fd6551_brightness_set(struct led_classdev *cdev,
 	int ret;
 
 	mutex_lock(&priv->lock);
-	ret = i2c_smbus_write_byte(priv->client, control);
+	ret = fd6551_write(priv->client, control);
 	mutex_unlock(&priv->lock);
 	return ret;
 }
@@ -76,7 +96,7 @@ static int fd6551_icon_set(struct led_classdev *cdev,
 		value |= led->mask;
 	else
 		value &= ~led->mask;
-	ret = i2c_smbus_write_byte(priv->grids[led->grid], value);
+	ret = fd6551_write(priv->grids[led->grid], value);
 	if (!ret)
 		priv->icons[led->grid] = value;
 	mutex_unlock(&priv->lock);
@@ -96,7 +116,7 @@ static void fd6551_text_work(struct work_struct *work)
 
 	mutex_lock(&priv->lock);
 	for (i = 0; i < FD6551_DIGITS; i++) {
-		ret = i2c_smbus_write_byte(priv->grids[priv->digits[i]], text[i]);
+		ret = fd6551_write(priv->grids[priv->digits[i]], text[i]);
 		if (ret)
 			break;
 	}
@@ -162,9 +182,10 @@ static int fd6551_probe(struct i2c_client *client)
 				     "expected control address 0x%02x\n",
 				     FD6551_CONTROL_ADDR);
 
-	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_WRITE_BYTE))
+	if (!i2c_check_functionality(client->adapter,
+				     I2C_FUNC_I2C | I2C_FUNC_PROTOCOL_MANGLING))
 		return dev_err_probe(dev, -EOPNOTSUPP,
-				     "SMBus write-byte transfers unavailable\n");
+				     "I2C transfers with ignored NAK unavailable\n");
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
 	if (!priv)
@@ -211,13 +232,13 @@ static int fd6551_probe(struct i2c_client *client)
 	}
 
 	/* RAM contents are undefined at power-on: blank before enabling. */
-	ret = i2c_smbus_write_byte(client, 0);
+	ret = fd6551_write(client, 0);
 	if (ret)
 		return dev_err_probe(dev, ret,
 				     "failed to blank control address 0x%02x\n",
 				     client->addr);
 	for (i = 0; i < FD6551_GRIDS; i++) {
-		ret = i2c_smbus_write_byte(priv->grids[i], 0);
+		ret = fd6551_write(priv->grids[i], 0);
 		if (ret)
 			return dev_err_probe(dev, ret,
 					     "failed to clear grid %d (0x%02x)\n",
