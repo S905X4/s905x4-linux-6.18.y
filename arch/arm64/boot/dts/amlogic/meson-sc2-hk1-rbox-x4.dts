@@ -344,6 +344,20 @@
 	};
 };
 
+&gpio {
+	/*
+	 * Stock drives this pad high; its module-side wake role is unknown.
+	 * The hog retains ownership across Bluetooth runtime/system suspend;
+	 * it is neither a Bluetooth-controlled wake output nor a wake IRQ.
+	 */
+	bluetooth-stock-output-hog {
+		gpio-hog;
+		gpios = <GPIOX_19 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "bluetooth-stock-output";
+	};
+};
+
 &uart_b {
 	status = "okay";
 };
@@ -525,6 +539,12 @@
 	voltage-ranges = <3300 3300>;
 	post-power-on-delay-ms = <100>;
 	mmc-pwrseq = <&wifi_pwrseq>;
+
+	wifi@1 {
+		compatible = "brcm,bcm4339-fmac", "brcm,bcm4329-fmac";
+		reg = <1>;
+		brcm,board-type = "hk1,rbox-x4";
+	};
 };
 
 &pwm_ef {
@@ -542,9 +562,9 @@
 	uart-has-rtscts;
 
 	bluetooth {
-		compatible = "realtek,rtl8821cs-bt", "realtek,rtl8723bs-bt";
-		enable-gpios = <&gpio GPIOX_17 GPIO_ACTIVE_HIGH>;
-		host-wake-gpios = <&gpio GPIOX_19 GPIO_ACTIVE_HIGH>;
+		/* Broadcom H4 family; exact Bluetooth ROM revision is not known. */
+		compatible = "brcm,bcm4329-bt";
+		shutdown-gpios = <&gpio GPIOX_17 GPIO_ACTIVE_HIGH>;
 		clocks = <&wifi32k>;
 		clock-names = "lpo";
 		max-speed = <1500000>;

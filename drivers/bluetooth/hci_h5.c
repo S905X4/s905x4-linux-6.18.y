@@ -7,7 +7,6 @@
  */
 
 #include <linux/acpi.h>
-#include <linux/clk.h>
 #include <linux/errno.h>
 #include <linux/gpio/consumer.h>
 #include <linux/kernel.h>
@@ -822,7 +821,6 @@ static int h5_serdev_probe(struct serdev_device *serdev)
 	struct device *dev = &serdev->dev;
 	struct h5 *h5;
 	const struct h5_device_data *data;
-	struct clk *lpo_clk;
 
 	h5 = devm_kzalloc(dev, sizeof(*h5), GFP_KERNEL);
 	if (!h5)
@@ -865,12 +863,6 @@ static int h5_serdev_probe(struct serdev_device *serdev)
 						       GPIOD_OUT_LOW);
 	if (IS_ERR(h5->device_wake_gpio))
 		return PTR_ERR(h5->device_wake_gpio);
-
-	/* Keep the shared LPO running independently of the Wi-Fi power state. */
-	lpo_clk = devm_clk_get_optional_enabled(dev, "lpo");
-	if (IS_ERR(lpo_clk))
-		return dev_err_probe(dev, PTR_ERR(lpo_clk),
-				     "Failed to enable LPO clock\n");
 
 	return hci_uart_register_device_priv(&h5->serdev_hu, &h5p,
 					     h5->vnd->sizeof_priv);
