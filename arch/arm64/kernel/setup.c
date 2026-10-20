@@ -26,6 +26,7 @@
 #include <linux/panic_notifier.h>
 #include <linux/proc_fs.h>
 #include <linux/memblock.h>
+#include <linux/of.h>
 #include <linux/of_fdt.h>
 #include <linux/efi.h>
 #include <linux/psci.h>
@@ -118,6 +119,17 @@ static void __init smp_build_mpidr_hash(void)
 	 */
 	for_each_possible_cpu(i)
 		mask |= (cpu_logical_map(i) ^ cpu_logical_map(0));
+	/*
+	 * SC2 firmware uses flattened CPU IDs in Aff0, while MPIDR_EL1
+	 * reports the cores in Aff1 with MT set.  Keep the firmware IDs
+	 * for PSCI, but hash the hardware affinity used by sleep.S.  Do
+	 * not shift a device tree that already describes physical IDs.
+	 */
+	if (of_machine_is_compatible("amlogic,sc2") &&
+	    (read_cpuid_mpidr() & MPIDR_MT_BITMASK) &&
+	    !(mask & ~MPIDR_LEVEL_MASK))
+		mask <<= MPIDR_LEVEL_BITS;
+
 	pr_debug("mask of set bits %#llx\n", mask);
 	/*
 	 * Find and stash the last and first bit set at all affinity levels to
