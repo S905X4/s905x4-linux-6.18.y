@@ -139,6 +139,7 @@ struct meson_mmc_data {
 	unsigned int always_on;
 	unsigned int adjust;
 	unsigned int irq_sdio_sleep;
+	bool mmc_hs_resampling;
 };
 
 struct sd_emmc_desc {
@@ -600,9 +601,20 @@ static int meson_mmc_prepare_ios_clock(struct meson_host *host,
 static void meson_mmc_check_resampling(struct meson_host *host,
 				       struct mmc_ios *ios)
 {
+	unsigned int val;
+
 	switch (ios->timing) {
-	case MMC_TIMING_LEGACY:
 	case MMC_TIMING_MMC_HS:
+		if (host->data->mmc_hs_resampling) {
+			/* SC2 uses the source-clock sampler in MMC high-speed mode. */
+			val = readl(host->regs + host->data->adjust);
+			val &= ~ADJUST_ADJ_DELAY_MASK;
+			val |= ADJUST_ADJ_EN;
+			writel(val, host->regs + host->data->adjust);
+			break;
+		}
+		fallthrough;
+	case MMC_TIMING_LEGACY:
 	case MMC_TIMING_SD_HS:
 	case MMC_TIMING_MMC_DDR52:
 		meson_mmc_disable_resampling(host);
@@ -1407,12 +1419,22 @@ static const struct meson_mmc_data meson_axg_data = {
 	.irq_sdio_sleep	= CLK_V3_IRQ_SDIO_SLEEP,
 };
 
+static const struct meson_mmc_data meson_sc2_data = {
+	.tx_delay_mask	= CLK_V3_TX_DELAY_MASK,
+	.rx_delay_mask	= CLK_V3_RX_DELAY_MASK,
+	.always_on	= CLK_V3_ALWAYS_ON,
+	.adjust		= SD_EMMC_V3_ADJUST,
+	.irq_sdio_sleep	= CLK_V3_IRQ_SDIO_SLEEP,
+	.mmc_hs_resampling = true,
+};
+
 static const struct of_device_id meson_mmc_of_match[] = {
 	{ .compatible = "amlogic,meson-gx-mmc",		.data = &meson_gx_data },
 	{ .compatible = "amlogic,meson-gxbb-mmc", 	.data = &meson_gx_data },
 	{ .compatible = "amlogic,meson-gxl-mmc",	.data = &meson_gx_data },
 	{ .compatible = "amlogic,meson-gxm-mmc",	.data = &meson_gx_data },
 	{ .compatible = "amlogic,meson-axg-mmc",	.data = &meson_axg_data },
+	{ .compatible = "amlogic,meson-sc2-mmc",	.data = &meson_sc2_data },
 	{}
 };
 MODULE_DEVICE_TABLE(of, meson_mmc_of_match);

@@ -21,6 +21,9 @@ properties:
     oneOf:
       - const: amlogic,meson-axg-mmc
       - items:
+          - const: amlogic,meson-sc2-mmc
+          - const: amlogic,meson-axg-mmc
+      - items:
           - const: amlogic,meson-gx-mmc
           - const: amlogic,meson-gxbb-mmc
 
