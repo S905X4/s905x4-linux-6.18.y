@@ -37,6 +37,8 @@ config REGULATOR_KUNIT_TEST
 	help
 	  Exercise voltage stepping and failed consumer requests through the
 	  regulator API using an isolated software regulator, without hardware.
+	  Cover inherited voltage handover, short final steps, failed requests
+	  and transitions between CPU operating-point voltages.
 
 config REGULATOR_FIXED_VOLTAGE
 	tristate "Fixed voltage regulator support"

@@ -177,15 +177,16 @@ static void voltage_step_opp_pairs_test(struct kunit *test)
 	};
 	struct voltage_step_test *ctx = test->priv;
 	unsigned int i, j;
+	int ret;
 
 	for (i = 0; i < ARRAY_SIZE(voltages); i++) {
 		for (j = 0; j < ARRAY_SIZE(voltages); j++) {
 			voltage_step_set_bounds(ctx, voltages[i]);
-			KUNIT_ASSERT_EQ(test, regulator_set_voltage(ctx->consumer,
-					voltages[i], voltages[i]), 0);
+			ret = regulator_set_voltage(ctx->consumer, voltages[i], voltages[i]);
+			KUNIT_ASSERT_EQ(test, ret, 0);
 			voltage_step_set_bounds(ctx, voltages[j]);
-			KUNIT_ASSERT_EQ(test, regulator_set_voltage(ctx->consumer,
-					voltages[j], voltages[j]), 0);
+			ret = regulator_set_voltage(ctx->consumer, voltages[j], voltages[j]);
+			KUNIT_ASSERT_EQ(test, ret, 0);
 			KUNIT_EXPECT_EQ(test, regulator_get_voltage(ctx->consumer), voltages[j]);
 			KUNIT_EXPECT_FALSE(test, ctx->invalid_step);
 		}
@@ -205,6 +206,7 @@ static struct kunit_suite voltage_step_test_suite = {
 	.init = voltage_step_test_init,
 	.test_cases = voltage_step_test_cases,
 };
+
 kunit_test_suite(voltage_step_test_suite);
 
 MODULE_DESCRIPTION("Regulator voltage step consumer tests");
