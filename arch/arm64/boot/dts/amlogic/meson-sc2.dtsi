@@ -155,6 +155,11 @@
 			interrupts = <GIC_PPI 9 IRQ_TYPE_LEVEL_HIGH>;
 		};
 
+		vrtc: rtc@fe010288 {
+			compatible = "amlogic,meson-vrtc";
+			reg = <0 0xfe010288 0 0x4>;
+		};
+
 		apb4: bus@fe000000 {
 			compatible = "simple-bus";
 			#address-cells = <2>;
