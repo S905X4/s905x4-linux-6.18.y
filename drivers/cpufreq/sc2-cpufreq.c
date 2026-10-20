@@ -107,7 +107,7 @@ static int sc2_cpufreq_config_clks(struct device *dev, struct opp_table *table,
 	if (ret)
 		goto failed;
 
-	/* The fixed 2 GHz / 3 path rounds the stock 666 MHz OPP. */
+	/* The fixed 2 GHz / 3 path rounds the stock 667 MHz OPP. */
 	if (abs((long)clk_get_rate(core) - (long)rate) > 10000000) {
 		ret = -EIO;
 		goto failed;
