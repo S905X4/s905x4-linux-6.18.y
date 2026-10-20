@@ -397,6 +397,7 @@
 	bus-width = <4>;
 	cap-sd-highspeed;
 	max-frequency = <50000000>;
+	voltage-ranges = <3300 3300>;
 	no-1-8-v;
 	disable-wp;
 	cd-gpios = <&gpio GPIOC_6 GPIO_ACTIVE_LOW>;
@@ -411,6 +412,7 @@
 	bus-width = <8>;
 	cap-mmc-highspeed;
 	max-frequency = <52000000>;
+	voltage-ranges = <3300 3300>;
 	non-removable;
 	disable-wp;
 	no-sd;
@@ -520,6 +522,7 @@
 	no-1-8-v;
 	keep-power-in-suspend;
 	max-frequency = <50000000>;
+	voltage-ranges = <3300 3300>;
 	post-power-on-delay-ms = <100>;
 	mmc-pwrseq = <&wifi_pwrseq>;
 };
