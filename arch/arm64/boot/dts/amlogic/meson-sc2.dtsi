@@ -464,9 +464,14 @@
 			compatible = "amlogic,meson-axg-mmc";
 			reg = <0 0xfe088000 0 0x800>;
 			interrupts = <GIC_SPI 176 IRQ_TYPE_LEVEL_HIGH>;
-			clocks = <&clkc CLKID_SD_EMMC_A>, <&xtal>,
-				 <&clkc CLKID_FCLK_DIV2>;
+			clocks = <&clkc CLKID_SD_EMMC_A>,
+				 <&clkc CLKID_SD_EMMC_A_CLK>, <&clkc CLKID_FCLK_DIV2>;
 			clock-names = "core", "clkin0", "clkin1";
+			/* Initial identification needs the 24MHz parent, not fclk. */
+			assigned-clocks = <&clkc CLKID_SD_EMMC_A_CLK_MUX>,
+					  <&clkc CLKID_SD_EMMC_A_CLK>;
+			assigned-clock-parents = <&xtal>;
+			assigned-clock-rates = <0>, <24000000>;
 			resets = <&reset RESET_SD_EMMC_A>;
 			#address-cells = <1>;
 			#size-cells = <0>;
