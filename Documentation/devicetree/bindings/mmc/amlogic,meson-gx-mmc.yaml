@@ -54,6 +54,18 @@ properties:
   power-domains:
     maxItems: 1
 
+  voltage-ranges:
+    $ref: /schemas/types.yaml#/definitions/uint32-matrix
+    description: |
+      Supported card-power voltage range in millivolts for supplies that
+      cannot be controlled by software. A voltage mask obtained from
+      vmmc-supply takes precedence. This does not select the bus IO voltage.
+    maxItems: 1
+    items:
+      items:
+        - description: Minimum card-power voltage in millivolts.
+        - description: Maximum card-power voltage in millivolts.
+
 required:
   - compatible
   - reg
