@@ -1160,6 +1160,13 @@ static int meson_mmc_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	if (!mmc->ocr_avail) {
+		ret = mmc_of_parse_voltage(mmc, &mmc->ocr_avail);
+		if (ret < 0)
+			return dev_err_probe(&pdev->dev, ret,
+					     "invalid voltage-ranges\n");
+	}
+
 	ret = mmc_of_parse(mmc);
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret, "error parsing DT\n");
