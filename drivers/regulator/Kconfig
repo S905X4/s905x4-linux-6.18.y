@@ -30,6 +30,14 @@ config REGULATOR_DEBUG
 	help
 	  Say yes here to enable debugging support.
 
+config REGULATOR_KUNIT_TEST
+	tristate "Regulator voltage stepping tests" if !KUNIT_ALL_TESTS
+	depends on KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  Exercise voltage stepping and failed consumer requests through the
+	  regulator API using an isolated software regulator, without hardware.
+
 config REGULATOR_FIXED_VOLTAGE
 	tristate "Fixed voltage regulator support"
 	help

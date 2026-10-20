@@ -111,6 +111,13 @@ when enabled, then the voltage changes instantly, otherwise the voltage
 configuration changes and the voltage is physically set when the regulator is
 next enabled.
 
+With a maximum voltage step constraint, an enabled regulator may need several
+intermediate settings before reaching the requested range. The call waits for
+each step's settling delay. If a step fails, the consumer's previous request
+is restored, but completed hardware steps are not automatically reversed.
+Consumers must handle the error before changing dependent clocks; an error
+does not mean that the physical voltage returned to its previous value.
+
 The regulators configured voltage output can be found by calling::
 
 	int regulator_get_voltage(regulator);

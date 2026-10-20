@@ -3831,14 +3831,15 @@ static int _regulator_do_set_suspend_voltage(struct regulator_dev *rdev,
 	return 0;
 }
 
-static int regulator_get_voltage_delta(struct regulator_dev *rdev, int uV)
+static int regulator_get_voltage_delta(struct regulator_dev *rdev,
+				       int min_uV, int max_uV)
 {
 	int current_uV = regulator_get_voltage_rdev(rdev);
 
 	if (current_uV < 0)
 		return current_uV;
 
-	return abs(current_uV - uV);
+	return abs(current_uV - clamp(current_uV, min_uV, max_uV));
 }
 
 static int regulator_set_voltage_unlocked(struct regulator *regulator,
@@ -3855,8 +3856,13 @@ static int regulator_set_voltage_unlocked(struct regulator *regulator,
 	 * should be a noop (some cpufreq implementations use the same
 	 * voltage for multiple frequencies, for example).
 	 */
-	if (voltage->min_uV == min_uV && voltage->max_uV == max_uV)
-		goto out;
+	if (voltage->min_uV == min_uV && voltage->max_uV == max_uV) {
+		if (!rdev->constraints->max_uV_step)
+			goto out;
+		ret = regulator_get_voltage_delta(rdev, min_uV, max_uV);
+		if (ret <= 0)
+			goto out;
+	}
 
 	/* If we're trying to set a range that overlaps the current voltage,
 	 * return successfully even though the regulator does not support
@@ -3891,41 +3897,45 @@ static int regulator_set_voltage_unlocked(struct regulator *regulator,
 
 	/* for not coupled regulators this will just set the voltage */
 	ret = regulator_balance_voltage(rdev, state);
-	if (ret < 0) {
-		voltage->min_uV = old_min_uV;
-		voltage->max_uV = old_max_uV;
-	}
+	if (ret < 0)
+		goto restore_voltage;
 
 	if (rdev->constraints->max_uV_step > 0) {
 		/* For regulators with a maximum voltage step, reaching the desired
 		 * voltage might take a few retries.
 		 */
-		ret = regulator_get_voltage_delta(rdev, min_uV);
+		ret = regulator_get_voltage_delta(rdev, min_uV, max_uV);
 		if (ret < 0)
-			goto out;
+			goto restore_voltage;
 
 		delta = ret;
 
 		while (delta > 0) {
 			ret = regulator_balance_voltage(rdev, state);
 			if (ret < 0)
-				goto out;
+				goto restore_voltage;
 
-			ret = regulator_get_voltage_delta(rdev, min_uV);
+			ret = regulator_get_voltage_delta(rdev, min_uV, max_uV);
 			if (ret < 0)
-				goto out;
+				goto restore_voltage;
 
 			new_delta = ret;
 
-			/* check that voltage is converging quickly enough */
-			if (delta - new_delta < rdev->constraints->max_uV_step) {
+			/* A shorter final step or discrete selector still makes progress. */
+			if (new_delta >= delta) {
 				ret = -EWOULDBLOCK;
-				goto out;
+				goto restore_voltage;
 			}
 
 			delta = new_delta;
 		}
 	}
+	goto out;
+
+restore_voltage:
+	/* Do not let an incomplete request become a successful same-range noop. */
+	voltage->min_uV = old_min_uV;
+	voltage->max_uV = old_max_uV;
 
 out:
 	return ret;
@@ -4150,8 +4160,11 @@ finish:
 		if (ret < 0)
 			return ret;
 
-		if (ret == 0)
+		if (ret == 0) {
+			/* This is an intermediate step, not the final consumer range. */
+			desired_max_uV = desired_min_uV;
 			done = false;
+		}
 	}
 
 	/* Set current_uV if wasn't done earlier in the code and if necessary */
