@@ -61,6 +61,7 @@ struct phy_g12a_usb3_pcie_priv {
 	struct regmap		*regmap;
 	struct regmap		*regmap_cr;
 	struct clk		*clk_ref;
+	struct clk		*clk_bgp;
 	struct reset_control	*reset;
 	struct phy		*phy;
 	unsigned int		mode;
@@ -365,14 +366,22 @@ static int phy_g12a_usb3_pcie_init(struct phy *phy)
 		ret = clk_prepare_enable(priv->clk_ref);
 		if (ret)
 			return ret;
+
+		ret = clk_prepare_enable(priv->clk_bgp);
+		if (ret) {
+			clk_disable_unprepare(priv->clk_ref);
+			return ret;
+		}
 	}
 
 	if (priv->mode != PHY_TYPE_USB3)
 		return 0;
 
 	ret = phy_g12a_usb3_init(phy);
-	if (ret && priv->soc_id == MESON_USB3_PCIE_SC2)
+	if (ret && priv->soc_id == MESON_USB3_PCIE_SC2) {
+		clk_disable_unprepare(priv->clk_bgp);
 		clk_disable_unprepare(priv->clk_ref);
+	}
 
 	return ret;
 }
@@ -385,8 +394,10 @@ static int phy_g12a_usb3_pcie_exit(struct phy *phy)
 	if (priv->mode == PHY_TYPE_USB3)
 		ret = reset_control_reset(priv->reset);
 
-	if (priv->soc_id == MESON_USB3_PCIE_SC2)
+	if (priv->soc_id == MESON_USB3_PCIE_SC2) {
+		clk_disable_unprepare(priv->clk_bgp);
 		clk_disable_unprepare(priv->clk_ref);
+	}
 
 	return ret;
 }
@@ -429,7 +440,6 @@ static int phy_g12a_usb3_pcie_probe(struct platform_device *pdev)
 	struct device_node *np = dev->of_node;
 	struct phy_g12a_usb3_pcie_priv *priv;
 	struct phy_provider *phy_provider;
-	struct clk *clk_bgp;
 	void __iomem *base;
 
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
@@ -460,11 +470,11 @@ static int phy_g12a_usb3_pcie_probe(struct platform_device *pdev)
 	if (IS_ERR(priv->clk_ref))
 		return PTR_ERR(priv->clk_ref);
 
-	/* SC2 has a separately gated analog bandgap reference. */
+	/* Defer bgp too: enabling it also starts its PLL parent. */
 	if (priv->soc_id == MESON_USB3_PCIE_SC2) {
-		clk_bgp = devm_clk_get_enabled(dev, "bgp");
-		if (IS_ERR(clk_bgp))
-			return PTR_ERR(clk_bgp);
+		priv->clk_bgp = devm_clk_get(dev, "bgp");
+		if (IS_ERR(priv->clk_bgp))
+			return PTR_ERR(priv->clk_bgp);
 	}
 
 	priv->reset = devm_reset_control_array_get_exclusive(dev);
