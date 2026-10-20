@@ -63,7 +63,7 @@
 			compatible = "fdhisi,fd6551";
 			reg = <0x24>;
 			fdhisi,digits = <4 3 2 1>;
-			default-brightness-level = <1>;
+			default-brightness-level = <8>;
 			#address-cells = <1>;
 			#size-cells = <0>;
 
