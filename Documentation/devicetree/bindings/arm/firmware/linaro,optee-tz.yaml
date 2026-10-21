@@ -24,6 +24,11 @@ description: |
   clients must not issue GET_THREAD_COUNT and must use the existing
   unknown-thread-count operation instead.
 
+  This firmware rejects command buffers in some otherwise usable
+  normal-world RAM. Driver allocations must use the reserved shared-memory
+  pool returned by GET_SHM_CONFIG. This does not override the advertised
+  dynamic shared-memory capability for external buffer registration.
+
 properties:
   $nodename:
     const: optee

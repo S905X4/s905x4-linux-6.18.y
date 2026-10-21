@@ -1768,7 +1768,14 @@ static int optee_probe(struct platform_device *pdev)
 	/*
 	 * Try to use dynamic shared memory if possible
 	 */
-	if (sec_caps & OPTEE_SMC_SEC_CAP_DYNAMIC_SHM) {
+	/*
+	 * SC2 firmware rejects argument pages in part of normal-world RAM.
+	 * Use its negotiated reserved pool for driver allocations, including
+	 * registration commands. Keep DYNAMIC_SHM for external registrations.
+	 */
+	if ((sec_caps & OPTEE_SMC_SEC_CAP_DYNAMIC_SHM) &&
+	    !of_device_is_compatible(pdev->dev.of_node,
+				     "amlogic,meson-sc2-optee-tz")) {
 		/*
 		 * If we have OPTEE_SMC_SEC_CAP_RPC_ARG we can ask
 		 * optee_get_msg_arg() to pre-register (by having
