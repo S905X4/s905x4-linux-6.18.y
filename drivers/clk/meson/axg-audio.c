@@ -11,6 +11,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
 #include <linux/slab.h>
@@ -1322,6 +1323,7 @@ struct audioclk_data {
 	const char *rst_drvname;
 	unsigned int max_register;
 	bool bypass_sysclk;
+	bool runtime_pm;
 };
 
 static struct clk_hw *sc2_audio_clk_get(struct of_phandle_args *clkspec,
@@ -1335,6 +1337,11 @@ static struct clk_hw *sc2_audio_clk_get(struct of_phandle_args *clkspec,
 		return &axg_aud_top;
 
 	return meson_clk_hw_get(clkspec, data);
+}
+
+static void axg_audio_runtime_put(void *data)
+{
+	pm_runtime_put_sync(data);
 }
 
 static int axg_audio_clkc_probe(struct platform_device *pdev)
@@ -1361,6 +1368,21 @@ static int axg_audio_clkc_probe(struct platform_device *pdev)
 	if (IS_ERR(map)) {
 		dev_err(dev, "failed to init regmap: %ld\n", PTR_ERR(map));
 		return PTR_ERR(map);
+	}
+
+	if (data->runtime_pm) {
+		ret = devm_pm_runtime_enable(dev);
+		if (ret)
+			return ret;
+
+		/* Keep the domain on while its clocks and resets are exposed. */
+		ret = pm_runtime_resume_and_get(dev);
+		if (ret)
+			return dev_err_probe(dev, ret, "failed to power audio domain\n");
+
+		ret = devm_add_action_or_reset(dev, axg_audio_runtime_put, dev);
+		if (ret)
+			return ret;
 	}
 
 	/* Get the mandatory peripheral clock */
@@ -1452,6 +1474,7 @@ static const struct audioclk_data sc2_audioclk_data = {
 	.rst_drvname = "rst-sm1",
 	.max_register = AUDIO_EARCRX_DMAC_CLK_CTRL,
 	.bypass_sysclk = true,
+	.runtime_pm = true,
 };
 
 static const struct of_device_id clkc_match_table[] = {
