@@ -1,0 +1,27 @@
+What:		/sys/bus/platform/devices/firmware:secure-monitor/boot_complete
+Date:		October 2026
+Contact:	Linux Amlogic mailing list <linux-amlogic@lists.infradead.org>
+Description:
+		Available only with amlogic,meson-sc2-sm firmware. Root-only
+		read/write (0600). Write exactly "1" (optional trailing newline)
+		only after validating the original local video TA and package.
+		The driver never issues this notification during probe.
+
+		The first valid write issues SMC 0xb200e060 with a1-a7 zero.
+		A mutex serializes writers, and the attempt is consumed before
+		entering firmware. A nonzero secure a0 returns EIO. Later writes
+		return the recorded result without issuing another SMC, including
+		after an interrupted/lost userspace reply or a nonzero status.
+		There is no reset/retry operation. The module is pinned after
+		the attempt so unload/reload cannot bypass the per-boot guard.
+
+		Before an attempt, reading returns:
+		  not-attempted
+		After an attempt has returned, reading returns:
+		  attempted a0=<hex> a1=<hex> a2=<hex> a3=<hex>
+		Each value is the complete native unsigned-long return register
+		(%#lx, zero is "0"); a newline terminates both forms. The raw
+		registers remain readable even if the write returned an error.
+		Neither notification success nor package preload constitutes
+		decode acceptance. Secure-world autonomous persistent effects
+		are not constrained by userspace RPC denial.

@@ -14,6 +14,10 @@ enum {
 	SM_GET_CHIP_ID,
 	SM_A1_PWRC_SET,
 	SM_A1_PWRC_GET,
+	/* SC2: index, decoder core and swap in arg0..arg2; arg3/arg4 = 0.
+	 * meson_sm_call() returns transport status; *ret is raw secure status.
+	 */
+	SM_VIDEO_FW_LOAD,
 };
 
 struct meson_sm_firmware;

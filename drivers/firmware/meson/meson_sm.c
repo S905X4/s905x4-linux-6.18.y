@@ -12,6 +12,7 @@
 #include <linux/bug.h>
 #include <linux/io.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
@@ -50,6 +51,28 @@ static const struct meson_sm_chip gxbb_chip = {
 		{ /* sentinel */ },
 	},
 };
+
+/* Function 15 is the SC2 video-index ABI, not OP-TEE GET_THREAD_COUNT. */
+static const struct meson_sm_chip sc2_chip = {
+	.shmem_size		= SZ_4K,
+	.cmd_shmem_in_base	= 0x82000020,
+	.cmd_shmem_out_base	= 0x82000021,
+	.cmd = {
+		CMD(SM_EFUSE_READ,	0x82000030),
+		CMD(SM_EFUSE_WRITE,	0x82000031),
+		CMD(SM_EFUSE_USER_MAX,	0x82000033),
+		CMD(SM_GET_CHIP_ID,	0x82000044),
+		CMD(SM_A1_PWRC_SET,	0x82000093),
+		CMD(SM_A1_PWRC_GET,	0x82000095),
+		CMD(SM_VIDEO_FW_LOAD,	0xb200000f),
+		{ /* sentinel */ },
+	},
+};
+
+/* Global, not per-probe: reprobe must not reset a consumed notification. */
+static DEFINE_MUTEX(sc2_boot_complete_lock);
+static bool sc2_boot_complete_attempted;
+static struct arm_smccc_res sc2_boot_complete_result;
 
 struct meson_sm_firmware {
 	const struct meson_sm_chip *chip;
@@ -279,13 +302,79 @@ static ssize_t serial_show(struct device *dev, struct device_attribute *attr,
 
 static DEVICE_ATTR_RO(serial);
 
+static ssize_t boot_complete_show(struct device *dev,
+				  struct device_attribute *attr, char *buf)
+{
+	const struct arm_smccc_res *res = &sc2_boot_complete_result;
+	ssize_t ret;
+
+	mutex_lock(&sc2_boot_complete_lock);
+	if (!sc2_boot_complete_attempted)
+		ret = sysfs_emit(buf, "not-attempted\n");
+	else
+		ret = sysfs_emit(buf, "attempted a0=%#lx a1=%#lx a2=%#lx a3=%#lx\n",
+				 res->a0, res->a1, res->a2, res->a3);
+	mutex_unlock(&sc2_boot_complete_lock);
+	return ret;
+}
+
+static ssize_t boot_complete_store(struct device *dev,
+				   struct device_attribute *attr,
+				   const char *buf, size_t count)
+{
+	int ret;
+
+	if (!sysfs_streq(buf, "1"))
+		return -EINVAL;
+	ret = mutex_lock_interruptible(&sc2_boot_complete_lock);
+	if (ret)
+		return ret;
+	if (!sc2_boot_complete_attempted) {
+		/* Pin the module so unload/reload cannot reset the per-boot guard.
+		 * Consume the attempt before entering firmware: uncertain delivery
+		 * and nonzero status must never cause an automatic second call.
+		 */
+		if (!try_module_get(THIS_MODULE)) {
+			ret = -ENODEV;
+			goto unlock;
+		}
+		sc2_boot_complete_attempted = true;
+		arm_smccc_smc(0xb200e060, 0, 0, 0, 0, 0, 0, 0,
+			      &sc2_boot_complete_result);
+		dev_notice(dev, "boot-complete a0=%#lx a1=%#lx a2=%#lx a3=%#lx\n",
+			   sc2_boot_complete_result.a0, sc2_boot_complete_result.a1,
+			   sc2_boot_complete_result.a2, sc2_boot_complete_result.a3);
+	}
+	ret = sc2_boot_complete_result.a0 ? -EIO : 0;
+unlock:
+	mutex_unlock(&sc2_boot_complete_lock);
+	return ret ? ret : count;
+}
+static DEVICE_ATTR(boot_complete, 0600, boot_complete_show, boot_complete_store);
+
+static umode_t meson_sm_sysfs_is_visible(struct kobject *kobj,
+				       struct attribute *attr, int index)
+{
+	struct meson_sm_firmware *fw = dev_get_drvdata(kobj_to_dev(kobj));
+
+	if (attr == &dev_attr_boot_complete.attr && fw->chip != &sc2_chip)
+		return 0;
+	return attr->mode;
+}
+
 static struct attribute *meson_sm_sysfs_attrs[] = {
 	&dev_attr_serial.attr,
+	&dev_attr_boot_complete.attr,
 	NULL,
 };
-ATTRIBUTE_GROUPS(meson_sm_sysfs);
+static const struct attribute_group meson_sm_sysfs_group = {
+	.attrs = meson_sm_sysfs_attrs,
+	.is_visible = meson_sm_sysfs_is_visible,
+};
+__ATTRIBUTE_GROUPS(meson_sm_sysfs);
 
 static const struct of_device_id meson_sm_ids[] = {
+	{ .compatible = "amlogic,meson-sc2-sm", .data = &sc2_chip },
 	{ .compatible = "amlogic,meson-gxbb-sm", .data = &gxbb_chip },
 	{ /* sentinel */ },
 };
