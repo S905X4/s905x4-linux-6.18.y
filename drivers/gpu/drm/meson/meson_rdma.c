@@ -75,10 +75,15 @@ void meson_rdma_stop(struct meson_drm *priv)
 			    priv->io_base + _REG(RDMA_CTRL));
 
 	/* Stop Channel 1 */
-	writel_bits_relaxed(RDMA_ACCESS_TRIGGER_CHAN1,
-			    FIELD_PREP(RDMA_ACCESS_ADDR_INC_CHAN1,
-				       RDMA_ACCESS_TRIGGER_STOP),
-			    priv->io_base + _REG(RDMA_ACCESS_AUTO));
+	if (priv->sc2)
+		writel_bits_relaxed(RDMA_AUTO_SRC1_MASK,
+				    RDMA_ACCESS_TRIGGER_STOP,
+				    priv->io_base + _REG(RDMA_AUTO_SRC1_SEL));
+	else
+		writel_bits_relaxed(RDMA_ACCESS_TRIGGER_CHAN1,
+				    FIELD_PREP(RDMA_ACCESS_TRIGGER_CHAN1,
+					       RDMA_ACCESS_TRIGGER_STOP),
+				    priv->io_base + _REG(RDMA_ACCESS_AUTO));
 }
 
 void meson_rdma_reset(struct meson_drm *priv)
@@ -96,8 +101,9 @@ static void meson_rdma_writel(struct meson_drm *priv, uint32_t val,
 		return;
 	}
 
-	priv->rdma.addr[priv->rdma.offset++] = reg;
-	priv->rdma.addr[priv->rdma.offset++] = val;
+	priv->rdma.addr[priv->rdma.offset * 2] = reg;
+	priv->rdma.addr[priv->rdma.offset * 2 + 1] = val;
+	priv->rdma.offset++;
 }
 
 /*
@@ -117,6 +123,9 @@ void meson_rdma_flush(struct meson_drm *priv)
 {
 	meson_rdma_stop(priv);
 
+	if (!priv->rdma.offset)
+		return;
+
 	/* Start of Channel 1 register writes buffer */
 	writel(priv->rdma.addr_dma,
 	       priv->io_base + _REG(RDMA_AHB_START_ADDR_1));
@@ -126,10 +135,15 @@ void meson_rdma_flush(struct meson_drm *priv)
 	       priv->io_base + _REG(RDMA_AHB_END_ADDR_1));
 
 	/* Trigger Channel 1 on VSYNC event */
-	writel_bits_relaxed(RDMA_ACCESS_TRIGGER_CHAN1,
-			    FIELD_PREP(RDMA_ACCESS_TRIGGER_CHAN1,
-				       RDMA_ACCESS_TRIGGER_VSYNC),
-			    priv->io_base + _REG(RDMA_ACCESS_AUTO));
+	if (priv->sc2)
+		writel_bits_relaxed(RDMA_AUTO_SRC1_MASK,
+				    RDMA_ACCESS_TRIGGER_VSYNC,
+				    priv->io_base + _REG(RDMA_AUTO_SRC1_SEL));
+	else
+		writel_bits_relaxed(RDMA_ACCESS_TRIGGER_CHAN1,
+				    FIELD_PREP(RDMA_ACCESS_TRIGGER_CHAN1,
+					       RDMA_ACCESS_TRIGGER_VSYNC),
+				    priv->io_base + _REG(RDMA_ACCESS_AUTO));
 
 	priv->rdma.offset = 0;
 }
