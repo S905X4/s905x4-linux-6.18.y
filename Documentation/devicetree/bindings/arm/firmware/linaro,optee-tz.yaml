@@ -17,12 +17,23 @@ description: |
   We're using "linaro" as the first part of the compatible property for
   the reference implementation maintained by Linaro.
 
+  Amlogic SC2 vendor firmware uses SMC function 15 (0xb200000f) to load
+  video firmware, with firmware index, decoder selector and swap flag in
+  a1-a3. This collides with the optional OP-TEE GET_THREAD_COUNT query.
+  The amlogic,meson-sc2-optee-tz compatible identifies this firmware ABI:
+  clients must not issue GET_THREAD_COUNT and must use the existing
+  unknown-thread-count operation instead.
+
 properties:
   $nodename:
     const: optee
 
   compatible:
-    const: linaro,optee-tz
+    oneOf:
+      - const: linaro,optee-tz
+      - items:
+          - const: amlogic,meson-sc2-optee-tz
+          - const: linaro,optee-tz
 
   interrupts:
     maxItems: 1

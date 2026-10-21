@@ -109,6 +109,11 @@
 	};
 
 	firmware {
+		optee {
+			compatible = "amlogic,meson-sc2-optee-tz", "linaro,optee-tz";
+			method = "smc";
+		};
+
 		sm: secure-monitor {
 			compatible = "amlogic,meson-sc2-sm", "amlogic,meson-gxbb-sm";
 

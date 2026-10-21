@@ -1752,7 +1752,12 @@ static int optee_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	thread_count = optee_msg_get_thread_count(invoke_fn);
+	/* SC2 vendor firmware uses function 15 to load video firmware. */
+	if (of_device_is_compatible(pdev->dev.of_node,
+				    "amlogic,meson-sc2-optee-tz"))
+		thread_count = 0;
+	else
+		thread_count = optee_msg_get_thread_count(invoke_fn);
 	if (!optee_msg_exchange_capabilities(invoke_fn, &sec_caps,
 					     &max_notif_value,
 					     &rpc_param_count)) {
