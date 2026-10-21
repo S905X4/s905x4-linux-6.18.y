@@ -110,7 +110,7 @@
 
 	firmware {
 		sm: secure-monitor {
-			compatible = "amlogic,meson-gxbb-sm";
+			compatible = "amlogic,meson-sc2-sm", "amlogic,meson-gxbb-sm";
 
 			pwrc: power-controller {
 				compatible = "amlogic,meson-sc2-pwrc";
