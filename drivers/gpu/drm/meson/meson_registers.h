@@ -657,6 +657,11 @@
 #define VPP_WRAP_OSD3_MATRIX_PRE_OFFSET2 0x3dbc
 #define VPP_WRAP_OSD3_MATRIX_EN_CTRL 0x3dbd
 
+/* video1 HDR */
+#define VD1_HDR2_CTRL 0x3800
+#define VD1_HDR2_CTRL_TOP_EN                   BIT(13)
+#define VD1_HDR2_CTRL_REG_ONLY_MAT             BIT(16)
+
 /* osd1 HDR */
 #define OSD1_HDR2_CTRL 0x38a0
 #define OSD1_HDR2_CTRL_VDIN0_HDR2_TOP_EN       BIT(13)

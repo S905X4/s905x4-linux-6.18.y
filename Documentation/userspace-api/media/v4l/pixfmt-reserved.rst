@@ -309,9 +309,11 @@ CAPTURE uses the multi-planar API with one memory plane, zero ``bytesperline``
 The coded rectangle is returned by ``V4L2_SEL_TGT_COMPOSE``. For the returned
 padded dimensions ``W`` and ``H``, the allocation layout is:
 
-* The FBC header starts at byte zero, with length
-  ``ceil(W / 128) * ceil(H / 64) * 32`` bytes.
-* Round that length up to 4096 bytes, then reserve a 4096-byte guard.
+* The scatter-map header starts at byte zero. Allocate
+  ``ALIGN(ceil(W / 64) * ceil(H / 64) * 128, 4096)`` bytes, then reserve
+  a 4096-byte guard. This is distinct from the smaller nominal
+  ``ceil(W / 128) * ceil(H / 64) * 32`` compression-register length;
+  that nominal value must not be used to size the header allocation.
 * The body starts there and contains ``(W / 64) * (H / 32) * 4096`` bytes,
   followed by a second 4096-byte guard. ``sizeimage`` includes both guards.
 * Every 4096-byte body page is in this same allocation. The decoder programs

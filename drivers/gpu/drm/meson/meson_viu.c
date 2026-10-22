@@ -447,6 +447,12 @@ void meson_viu_init(struct meson_drm *priv)
 		writel_bits_relaxed(OSD1_HDR2_CTRL_REG_ONLY_MAT |
 				OSD1_HDR2_CTRL_VDIN0_HDR2_TOP_EN, 0,
 				priv->io_base + _REG(OSD1_HDR2_CTRL));
+
+		/* SC2 U-Boot leaves an RGB-to-YUV matrix on the YUV video path. */
+		if (priv->sc2)
+			writel_bits_relaxed(VD1_HDR2_CTRL_REG_ONLY_MAT |
+					    VD1_HDR2_CTRL_TOP_EN, 0,
+					    priv->io_base + _REG(VD1_HDR2_CTRL));
 	}
 
 	/* Initialize OSD1 fifo control register */
