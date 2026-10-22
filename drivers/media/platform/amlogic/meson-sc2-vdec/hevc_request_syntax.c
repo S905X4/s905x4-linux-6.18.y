@@ -642,10 +642,9 @@ static int original_prefix(const struct meson_hevc_syntax_request *request,
 	reader.pos = prefix + 2;
 	reader.end = sl->data_byte_offset;
 	first = read_bits(&reader, 1);
-	if (is_irap(sl->nal_unit_type) &&
-	    read_bits(&reader, 1) !=
-	    !!(request->decode->flags & V4L2_HEVC_DECODE_PARAM_FLAG_NO_OUTPUT_OF_PRIOR))
-		return fail(error, -EINVAL, "original no_output_of_prior_pics disagrees with decode control");
+	/* A parser may resolve CRA random access differently after a flush. */
+	if (is_irap(sl->nal_unit_type))
+		read_bits(&reader, 1);
 	if (read_ue(&reader) != pps->pic_parameter_set_id)
 		return fail(error, -EINVAL, "original slice PPS ID disagrees with control");
 	if (!first) {
