@@ -45,6 +45,12 @@
 		reg = <0 0 0 0xf0000000>;
 	};
 
+	reserved-memory {
+		linux,cma {
+			size = <0x0 0x20000000>;
+		};
+	};
+
 	leds {
 		compatible = "gpio-leds";
 
