@@ -10,6 +10,7 @@
 #include <media/videobuf2-dma-contig.h>
 
 #include "vdec_helpers.h"
+#include "dos_regs.h"
 
 #define NUM_CANVAS_NV12 2
 #define NUM_CANVAS_YUV420 3
@@ -156,6 +157,12 @@ static int set_canvas_nv12m(struct amvdec_session *sess,
 		    vb2_dma_contig_plane_dma_addr(vb, i);
 	}
 
+	if (core->platform->revision == VDEC_REVISION_SC2) {
+		amvdec_write_dos(core, VDEC_ASSIST_CANVAS_BLK32,
+				BIT(11) | BIT(8) | canvas_id[0]);
+		amvdec_write_dos(core, VDEC_ASSIST_CANVAS_BLK32,
+				BIT(11) | BIT(8) | canvas_id[1]);
+	}
 	/* Y plane */
 	meson_canvas_config(core->canvas, canvas_id[0], buf_paddr[0],
 			    width, height, MESON_CANVAS_WRAP_NONE,
@@ -181,13 +188,16 @@ int amvdec_set_canvases(struct amvdec_session *sess,
 {
 	struct v4l2_m2m_buffer *buf;
 	u32 pixfmt = sess->pixfmt_cap;
-	u32 width = ALIGN(sess->width, 32);
-	u32 height = ALIGN(sess->height, 32);
+	u32 width = amvdec_get_output_width(sess);
+	u32 height = amvdec_get_output_height(sess);
 	u32 reg_cur;
 	u32 reg_num_cur = 0;
 	u32 reg_base_cur = 0;
 	int i = 0;
 	int ret;
+	while (sess->canvas_num)
+		meson_canvas_free(sess->core->canvas,
+				  sess->canvas_alloc[--sess->canvas_num]);
 
 	v4l2_m2m_for_each_dst_buf(sess->m2m_ctx, buf) {
 		if (!reg_base[reg_base_cur])
@@ -233,6 +243,8 @@ int amvdec_add_ts(struct amvdec_session *sess, u64 ts,
 	struct amvdec_timestamp *new_ts;
 	unsigned long flags;
 
+	if (!sess->input_frames)
+		return 0;
 	new_ts = kzalloc(sizeof(*new_ts), GFP_KERNEL);
 	if (!new_ts)
 		return -ENOMEM;
@@ -241,6 +253,8 @@ int amvdec_add_ts(struct amvdec_session *sess, u64 ts,
 	new_ts->tc = tc;
 	new_ts->offset = offset;
 	new_ts->flags = vbuf_flags;
+	new_ts->remaining = sess->input_frames;
+	new_ts->end_offset = offset + sess->input_size;
 
 	spin_lock_irqsave(&sess->ts_spinlock, flags);
 	list_add_tail(&new_ts->list, &sess->timestamps);
@@ -270,6 +284,26 @@ unlock:
 }
 EXPORT_SYMBOL_GPL(amvdec_remove_ts);
 
+void amvdec_eos(struct amvdec_session *sess)
+{
+	const struct v4l2_event ev = { .type = V4L2_EVENT_EOS };
+	struct vb2_v4l2_buffer *buf;
+	unsigned int plane;
+
+	if (cmpxchg(&sess->eos_completed, false, true))
+		return;
+	v4l2_event_queue_fh(&sess->fh, &ev);
+	buf = v4l2_m2m_dst_buf_remove(sess->m2m_ctx);
+	if (!buf)
+		return;
+	for (plane = 0; plane < buf->vb2_buf.num_planes; plane++)
+		vb2_set_plane_payload(&buf->vb2_buf, plane, 0);
+	buf->field = V4L2_FIELD_NONE;
+	buf->sequence = sess->sequence_cap++;
+	v4l2_m2m_last_buffer_done(sess->m2m_ctx, buf);
+}
+EXPORT_SYMBOL_GPL(amvdec_eos);
+
 static void dst_buf_done(struct amvdec_session *sess,
 			 struct vb2_v4l2_buffer *vbuf,
 			 u32 field, u64 timestamp,
@@ -296,6 +330,7 @@ static void dst_buf_done(struct amvdec_session *sess,
 	vbuf->timecode = timecode;
 
 	if (sess->should_stop &&
+	    sess->core->platform->revision != VDEC_REVISION_SC2 &&
 	    atomic_read(&sess->esparser_queued_bufs) <= 1) {
 		const struct v4l2_event ev = { .type = V4L2_EVENT_EOS };
 
@@ -330,6 +365,7 @@ void amvdec_dst_buf_done(struct amvdec_session *sess,
 	u64 timestamp;
 	u32 vbuf_flags;
 	unsigned long flags;
+	bool consumed;
 
 	spin_lock_irqsave(&sess->ts_spinlock, flags);
 	if (list_empty(timestamps)) {
@@ -345,12 +381,16 @@ void amvdec_dst_buf_done(struct amvdec_session *sess,
 	timestamp = tmp->ts;
 	timecode = tmp->tc;
 	vbuf_flags = tmp->flags;
-	list_del(&tmp->list);
-	kfree(tmp);
+	consumed = !--tmp->remaining;
+	if (consumed) {
+		list_del(&tmp->list);
+		kfree(tmp);
+	}
 	spin_unlock_irqrestore(&sess->ts_spinlock, flags);
 
 	dst_buf_done(sess, vbuf, field, timestamp, timecode, vbuf_flags);
-	atomic_dec(&sess->esparser_queued_bufs);
+	if (consumed)
+		atomic_dec(&sess->esparser_queued_bufs);
 }
 EXPORT_SYMBOL_GPL(amvdec_dst_buf_done);
 
@@ -365,12 +405,13 @@ void amvdec_dst_buf_done_offset(struct amvdec_session *sess,
 	u64 timestamp = 0;
 	u32 vbuf_flags = 0;
 	unsigned long flags;
+	bool consumed = false;
 
 	spin_lock_irqsave(&sess->ts_spinlock, flags);
 
 	/* Look for our vififo offset to get the corresponding timestamp. */
 	list_for_each_entry_safe(tmp, n, &sess->timestamps, list) {
-		if (tmp->offset > offset) {
+		if ((s32)(tmp->offset - offset) > 0) {
 			/*
 			 * Delete any record that remained unused for 32 match
 			 * checks
@@ -392,13 +433,16 @@ void amvdec_dst_buf_done_offset(struct amvdec_session *sess,
 		timestamp = match->ts;
 		timecode = match->tc;
 		vbuf_flags = match->flags;
-		list_del(&match->list);
-		kfree(match);
+		consumed = !--match->remaining;
+		if (consumed) {
+			list_del(&match->list);
+			kfree(match);
+		}
 	}
 	spin_unlock_irqrestore(&sess->ts_spinlock, flags);
 
 	dst_buf_done(sess, vbuf, field, timestamp, timecode, vbuf_flags);
-	if (match)
+	if (consumed)
 		atomic_dec(&sess->esparser_queued_bufs);
 }
 EXPORT_SYMBOL_GPL(amvdec_dst_buf_done_offset);
@@ -408,6 +452,10 @@ void amvdec_dst_buf_done_idx(struct amvdec_session *sess,
 {
 	struct vb2_v4l2_buffer *vbuf;
 	struct device *dev = sess->core->dev_dec;
+	if (buf_idx >= sess->num_dst_bufs || buf_idx >= 32) {
+		amvdec_abort(sess);
+		return;
+	}
 
 	vbuf = v4l2_m2m_dst_buf_remove_by_idx(sess->m2m_ctx,
 					      sess->fw_idx_to_vb2_idx[buf_idx]);
@@ -455,8 +503,13 @@ void amvdec_src_change(struct amvdec_session *sess, u32 width,
 	if (sess->streamon_cap &&
 	    sess->width == width &&
 	    sess->height == height &&
-	    dpb_size <= sess->num_dst_bufs) {
-		sess->fmt_out->codec_ops->resume(sess);
+	    dpb_size <= sess->num_dst_bufs &&
+	    (sess->core->platform->revision != VDEC_REVISION_SC2 ||
+	     v4l2_m2m_num_dst_bufs_ready(sess->m2m_ctx) == sess->num_dst_bufs)) {
+		if (sess->fmt_out->codec_ops->resume)
+			sess->fmt_out->codec_ops->resume(sess);
+		if (!sess->aborted)
+			sess->status = STATUS_RUNNING;
 		return;
 	}
 
@@ -474,6 +527,8 @@ EXPORT_SYMBOL_GPL(amvdec_src_change);
 void amvdec_abort(struct amvdec_session *sess)
 {
 	dev_info(sess->core->dev, "Aborting decoding session!\n");
+	sess->should_stop = 1;
+	sess->aborted = true;
 	vb2_queue_error(&sess->m2m_ctx->cap_q_ctx.q);
 	vb2_queue_error(&sess->m2m_ctx->out_q_ctx.q);
 }

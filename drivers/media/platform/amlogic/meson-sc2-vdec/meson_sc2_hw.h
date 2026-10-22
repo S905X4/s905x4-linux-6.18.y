@@ -69,6 +69,14 @@ int meson_sc2_hevc_fbc_bind(struct meson_sc2_hevc_context *context,
 			   struct meson_sc2_surface *surface,
 			   u32 width, u32 height, void *cpu, dma_addr_t dma,
 			   size_t size, struct dma_buf *buffer);
+/* Stateful VP9/AVS2 keep the actual 8/10-bit FBC depth; MV storage is
+ * codec-sized (VP9 0x240, AVS2 0x200 bytes per 64x64 block).
+ */
+int meson_sc2_modern_fbc_bind(struct meson_sc2_hevc_context *context,
+			     struct meson_sc2_surface *surface,
+			     u32 width, u32 height, u8 depth, u32 mv_unit,
+			     void *cpu, dma_addr_t dma, size_t size,
+			     struct dma_buf *buffer);
 int meson_sc2_av1_surface_alloc(struct meson_sc2_hw *hw,
 			       struct meson_sc2_surface *surface,
 			       u32 width, u32 height);

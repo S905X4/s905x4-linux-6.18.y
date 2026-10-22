@@ -143,7 +143,36 @@ struct codec_h264 {
 	u32 mb_width;
 	u32 mb_height;
 	u32 max_refs;
+	u32 seq_info;
+	u32 max_dpb;
+	u32 mv_bytes;
+	u32 level;
 };
+
+/* Single firmware scratch0 distinguishes the SPS reference count, level
+ * DPB capacity and actual surface reservoir. Do not substitute one for the
+ * other: B-picture reordering can need more DPB slots than active references.
+ */
+static u32 codec_h264_max_dpb(u32 level, u32 mb_width, u32 mb_height)
+{
+	u32 capacity;
+	u32 size = ALIGN(mb_width, 4) * ALIGN(mb_height, 4) * 3840;
+
+	switch (level) {
+	case 10: capacity = 1485; break;
+	case 11: capacity = 3375; break;
+	case 12: case 13: case 20: capacity = 8910; break;
+	case 21: capacity = 17820; break;
+	case 22: case 30: capacity = 30375; break;
+	case 31: capacity = 67500; break;
+	case 32: capacity = 76800; break;
+	case 40: case 41: case 42: capacity = 122880; break;
+	case 50: capacity = 414000; break;
+	case 51: case 52: capacity = 691200; break;
+	default: return 16;
+	}
+	return min(DIV_ROUND_UP(capacity * 1024, size), 16U);
+}
 
 static int codec_h264_can_recycle(struct amvdec_core *core)
 {
@@ -168,6 +197,12 @@ static int codec_h264_start(struct amvdec_session *sess)
 	u32 workspace_offset;
 	struct amvdec_core *core = sess->core;
 	struct codec_h264 *h264 = sess->priv;
+	if (!h264) {
+		h264 = kzalloc(sizeof(*h264), GFP_KERNEL);
+		if (!h264)
+			return -ENOMEM;
+		sess->priv = h264;
+	}
 
 	/* Allocate some memory for the H.264 decoder's state */
 	h264->workspace_vaddr =
@@ -186,9 +221,16 @@ static int codec_h264_start(struct amvdec_session *sess)
 
 	workspace_offset = h264->workspace_paddr - WORKSPACE_BUF_OFFSET;
 	amvdec_write_dos(core, AV_SCRATCH_1, workspace_offset);
-	amvdec_write_dos(core, AV_SCRATCH_G, h264->ext_fw_paddr);
+	if (core->platform->revision != VDEC_REVISION_SC2)
+		amvdec_write_dos(core, AV_SCRATCH_G, h264->ext_fw_paddr);
 	amvdec_write_dos(core, AV_SCRATCH_I, h264->sei_paddr -
 					     workspace_offset);
+	amvdec_write_dos(core, AV_SCRATCH_0, 0);
+	amvdec_write_dos(core, AV_SCRATCH_7, 0);
+	amvdec_write_dos(core, AV_SCRATCH_8, 0);
+	amvdec_write_dos(core, AV_SCRATCH_9, 0);
+	amvdec_write_dos(core, AV_SCRATCH_N, 0);
+	amvdec_write_dos(core, PSCALE_CTRL, 0);
 
 	/* Enable "error correction" */
 	amvdec_write_dos(core, AV_SCRATCH_F,
@@ -288,9 +330,12 @@ static void codec_h264_resume(struct amvdec_session *sess)
 	struct codec_h264 *h264 = sess->priv;
 	u32 mb_width, mb_height, mb_total;
 
-	amvdec_set_canvases(sess,
-			    (u32[]){ ANC0_CANVAS_ADDR, 0 },
-			    (u32[]){ 24, 0 });
+	if (amvdec_set_canvases(sess,
+				(u32[]){ ANC0_CANVAS_ADDR, 0 },
+				(u32[]){ 24, 0 })) {
+		amvdec_abort(sess);
+		return;
+	}
 
 	dev_dbg(core->dev, "max_refs = %u; actual_dpb_size = %u\n",
 		h264->max_refs, sess->num_dst_bufs);
@@ -300,7 +345,12 @@ static void codec_h264_resume(struct amvdec_session *sess)
 	mb_height = ALIGN(h264->mb_height, 4);
 	mb_total = mb_width * mb_height;
 
-	h264->ref_size = mb_total * MB_MV_SIZE * h264->max_refs;
+	if (h264->ref_vaddr) {
+		dma_free_coherent(core->dev, h264->ref_size,
+				  h264->ref_vaddr, h264->ref_paddr);
+		h264->ref_vaddr = NULL;
+	}
+	h264->ref_size = mb_total * h264->mv_bytes * h264->max_refs;
 	h264->ref_vaddr = dma_alloc_coherent(core->dev, h264->ref_size,
 					     &h264->ref_paddr, GFP_KERNEL);
 	if (!h264->ref_vaddr) {
@@ -315,7 +365,7 @@ static void codec_h264_resume(struct amvdec_session *sess)
 
 	amvdec_write_dos(core, AV_SCRATCH_0, (h264->max_refs << 24) |
 					     (sess->num_dst_bufs << 16) |
-					     ((h264->max_refs - 1) << 8));
+					     (h264->max_dpb << 8));
 }
 
 /*
@@ -329,31 +379,89 @@ static void codec_h264_src_change(struct amvdec_session *sess)
 	u32 crop_infor, crop_bottom, crop_right;
 	u32 frame_width, frame_height;
 
+	parsed_info = amvdec_read_dos(core, AV_SCRATCH_1);
+	if (sess->should_stop && READ_ONCE(sess->eos_queued) &&
+	    ((parsed_info >> MB_TOTAL_BIT) & MB_TOTAL_MASK) == 1 &&
+	    (parsed_info & MB_WIDTH_MASK) == 1 &&
+	    amvdec_read_dos(core, AV_SCRATCH_A) == 10) {
+		/* The private drain sentinel is a level-1.0 16x16 SPS, outside
+		 * this node's supported dimensions. Real pending SPS changes
+		 * must still configure their DPB and flush preceding pictures.
+		 * Never acknowledge the sentinel or reconstruct its IDR pixels.
+		 */
+		amvdec_eos(sess);
+		return;
+	}
 	sess->keyframe_found = 1;
 
-	parsed_info = amvdec_read_dos(core, AV_SCRATCH_1);
 
 	/* Total number of 16x16 macroblocks */
 	mb_total = (parsed_info >> MB_TOTAL_BIT) & MB_TOTAL_MASK;
 	/* Number of macroblocks per line */
 	h264->mb_width = parsed_info & MB_WIDTH_MASK;
+	if (!h264->mb_width || !mb_total || mb_total % h264->mb_width) {
+		amvdec_abort(sess);
+		return;
+	}
 	/* Number of macroblock lines */
 	h264->mb_height = mb_total / h264->mb_width;
 
 	h264->max_refs = ((parsed_info >> MAX_REF_BIT) & MAX_REF_MASK) + 1;
+	h264->seq_info = amvdec_read_dos(core, AV_SCRATCH_2);
+	h264->mv_bytes = MB_MV_SIZE;
+	h264->max_dpb = h264->max_refs - 1;
+	if (core->platform->revision == VDEC_REVISION_SC2) {
+		u32 level = amvdec_read_dos(core, AV_SCRATCH_A);
+
+		if (level)
+			h264->level = level;
+		h264->max_dpb = max(h264->max_dpb,
+			codec_h264_max_dpb(h264->level, h264->mb_width, h264->mb_height));
+		h264->mv_bytes = parsed_info & BIT(31) ? 24 : MB_MV_SIZE;
+	}
+	{
+		u32 tick = amvdec_read_dos(core, AV_SCRATCH_4);
+		u32 scale = amvdec_read_dos(core, AV_SCRATCH_5);
+
+		/* H264 VUI clock is twice the FRAME cadence, including PAFF/MBAFF. */
+		if (tick && tick <= U32_MAX / 2 && scale) {
+			sess->timeperframe.numerator = 2 * tick;
+			sess->timeperframe.denominator = scale;
+		}
+	}
+	if (((h264->seq_info >> 13) & 3) != 1 ||
+	    h264->max_refs > 17 || h264->max_dpb + 6 > sess->fmt_out->max_buffers ||
+	    h264->mb_width * 16 > sess->fmt_out->max_width ||
+	    h264->mb_height * 16 > ALIGN(sess->fmt_out->max_height, 16)) {
+		amvdec_abort(sess);
+		return;
+	}
 
 	crop_infor = amvdec_read_dos(core, AV_SCRATCH_6);
 	crop_bottom = (crop_infor & 0xff);
 	crop_right = (crop_infor >> 16) & 0xff;
+	sess->crop_left = (crop_infor >> 24) & 0xff;
+	sess->crop_top = (crop_infor >> 8) & 0xff;
 
-	frame_width = h264->mb_width * 16 - crop_right;
-	frame_height = h264->mb_height * 16 - crop_bottom;
+	frame_width = h264->mb_width * 16;
+	frame_height = h264->mb_height * 16;
+	if (crop_right + sess->crop_left >= frame_width ||
+	    crop_bottom + sess->crop_top >= frame_height) {
+		amvdec_abort(sess);
+		return;
+	}
+	sess->visible_width = frame_width - crop_right - sess->crop_left;
+	sess->visible_height = frame_height - crop_bottom - sess->crop_top;
+	sess->field = h264->seq_info & BIT(15) ? V4L2_FIELD_NONE :
+		V4L2_FIELD_INTERLACED;
 
 	dev_dbg(core->dev, "frame: %ux%u; crop: %u %u\n",
 		frame_width, frame_height, crop_right, crop_bottom);
 
 	codec_h264_set_par(sess);
-	amvdec_src_change(sess, frame_width, frame_height, h264->max_refs + 5);
+	amvdec_src_change(sess, frame_width, frame_height,
+			  core->platform->revision == VDEC_REVISION_SC2 ?
+			  h264->max_dpb + 6 : h264->max_refs + 5);
 }
 
 /*
@@ -376,11 +484,16 @@ static void codec_h264_frames_ready(struct amvdec_session *sess, u32 status)
 {
 	struct amvdec_core *core = sess->core;
 	int error_count;
+	struct codec_h264 *h264 = sess->priv;
 	int num_frames;
 	int i;
 
 	error_count = amvdec_read_dos(core, AV_SCRATCH_D);
 	num_frames = (status >> 8) & 0xff;
+	if (num_frames > 6) {
+		amvdec_abort(sess);
+		return;
+	}
 	if (error_count) {
 		dev_warn(core->dev,
 			 "decoder error(s) happened, count %d\n", error_count);
@@ -404,13 +517,26 @@ static void codec_h264_frames_ready(struct amvdec_session *sess, u32 status)
 			dev_dbg(core->dev, "Buffer %d decode error\n",
 				buffer_index);
 
-		if (pic_struct == PIC_TOP_BOT)
-			field = V4L2_FIELD_INTERLACED_TB;
-		else if (pic_struct == PIC_BOT_TOP)
-			field = V4L2_FIELD_INTERLACED_BT;
+		/* Single-firmware pic_struct 0..4 means progressive only when the
+		 * SPS says picture timing is present. PAFF/MBAFF otherwise use
+		 * prog_frame and POC order, even when pic_struct is zero.
+		 */
+		if (h264->seq_info & BIT(4)) {
+			if (pic_struct == PIC_TOP_BOT)
+				field = V4L2_FIELD_INTERLACED_TB;
+			else if (pic_struct == PIC_BOT_TOP)
+				field = V4L2_FIELD_INTERLACED_BT;
+		} else if (!(h264->seq_info & BIT(15)) &&
+			   !(frame_status & BIT(8))) {
+			field = frame_status & BIT(9) ? V4L2_FIELD_INTERLACED_BT :
+				V4L2_FIELD_INTERLACED_TB;
+		}
+		sess->field = field;
 
 		offset |= get_offset_msb(core, i);
 		amvdec_dst_buf_done_idx(sess, buffer_index, offset, field);
+		if (sess->should_stop && (frame_status & BIT(15)))
+			amvdec_eos(sess);
 	}
 }
 

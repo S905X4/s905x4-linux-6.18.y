@@ -4,8 +4,13 @@ config VIDEO_MESON_VDEC
 	tristate "Amlogic video decoder driver"
 	depends on VIDEO_DEV && HAS_DMA
 	depends on ARCH_MESON || COMPILE_TEST
+	depends on OF && PM
+	select MESON_SM if ARM64_4K_PAGES
+	select MESON_SC2_DOS
 	select VIDEOBUF2_DMA_CONTIG
 	select V4L2_MEM2MEM_DEV
 	select MESON_CANVAS
 	help
-	Support for the video decoder found in gxbb/gxl/gxm chips.
+	Support for the video decoder found in GXBB/GXL/GXM/G12/SM1 and SC2.
+	SC2 uses the original secure firmware preloaded by the platform and
+	the VDEC power domain; no normal-world firmware is uploaded on SC2.

@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/amlogic,meson-sc2-vdec.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Amlogic SC2 stateful VDEC1 decoder
+
+maintainers:
+  - Linux Media Mailing List <linux-media@vger.kernel.org>
+
+description: |
+  VDEC1 reconstructs H.264, MPEG-1/2 and other legacy elementary streams.
+  Its mailbox and power domain are independent of HEVC, but the DOS
+  aperture, DMC control and secure loader are shared. Drivers must acquire
+  the common SC2 DOS lease before accessing these resources. The HEVC
+  platform device retains the DOS aperture reservation. No global DOS or
+  APB reset is permitted while either decoder is in use.
+  SC2 feeds the VLD FIFO through its software-managed stream write pointer;
+  it does not use the older GX ES parser MMIO, IRQ, clock or reset sequence.
+  Factory secure firmware must have been preloaded by platform userspace.
+
+properties:
+  compatible:
+    const: amlogic,meson-sc2-vdec
+  reg:
+    items:
+      - description: Shared DOS aperture
+      - description: Shared DMC request and idle acknowledgement registers
+  reg-names:
+    items:
+      - const: dos
+      - const: dmc
+  interrupts:
+    maxItems: 1
+  interrupt-names:
+    const: vdec
+  clocks:
+    maxItems: 2
+  clock-names:
+    items:
+      - const: dos
+      - const: vdec_1
+  power-domains:
+    maxItems: 1
+  amlogic,canvas:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Shared canvas LUT provider
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - interrupt-names
+  - clocks
+  - clock-names
+  - power-domains
+  - amlogic,canvas
+
+additionalProperties: false

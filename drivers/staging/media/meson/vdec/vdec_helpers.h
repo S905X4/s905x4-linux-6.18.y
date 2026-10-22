@@ -87,4 +87,5 @@ void amvdec_src_change(struct amvdec_session *sess, u32 width,
  * @sess: current session
  */
 void amvdec_abort(struct amvdec_session *sess);
+void amvdec_eos(struct amvdec_session *sess);
 #endif

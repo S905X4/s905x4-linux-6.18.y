@@ -13,6 +13,14 @@
 	status = "okay";
 };
 
+&vdec_1 {
+	status = "okay";
+};
+
+&di {
+	status = "okay";
+};
+
 / {
 	model = "HK1 RBOX X4 (S905X4, 4GB)";
 	compatible = "hk1,rbox-x4", "amlogic,sc2";

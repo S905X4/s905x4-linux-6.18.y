@@ -12,6 +12,7 @@
 #include "codec_mpeg12.h"
 #include "codec_h264.h"
 #include "codec_vp9.h"
+#include "codec_legacy.h"
 
 static const struct amvdec_format vdec_formats_gxbb[] = {
 	{
@@ -287,6 +288,48 @@ static const struct amvdec_format vdec_formats_sm1[] = {
 		.pixfmts_cap = { V4L2_PIX_FMT_NV12M, V4L2_PIX_FMT_YUV420M, 0 },
 		.flags = V4L2_FMT_FLAG_COMPRESSED,
 	},
+};
+
+/* Single-instance VDEC protocols. A secure ID is not a filename and must
+ * never fall through to the old normal-world IMEM upload path.
+ */
+#define SC2_FIXED_FORMAT(fourcc, ops, index, buffers) { \
+	.pixfmt = (fourcc), .min_buffers = (buffers), .max_buffers = (buffers), \
+	.max_width = 1920, .max_height = 1088, \
+	.capture_width = 1920, .capture_height = 1088, .needs_capture = true, \
+	.vdec_ops = &vdec_1_ops, .codec_ops = &(ops), \
+	.firmware_index = (index), .pixfmts_cap = { V4L2_PIX_FMT_NV12M, 0 }, \
+	.flags = V4L2_FMT_FLAG_COMPRESSED | V4L2_FMT_FLAG_DYN_RESOLUTION, \
+}
+
+static const struct amvdec_format vdec_formats_sc2[] = {
+	{
+		.pixfmt = V4L2_PIX_FMT_H264,
+		.min_buffers = 2,
+		.max_buffers = 24,
+		.max_width = 3840,
+		.max_height = 2160,
+		.vdec_ops = &vdec_1_ops,
+		.codec_ops = &codec_h264_ops,
+		.firmware_index = 0x0b,
+		.pixfmts_cap = { V4L2_PIX_FMT_NV12M, 0 },
+		.flags = V4L2_FMT_FLAG_COMPRESSED | V4L2_FMT_FLAG_DYN_RESOLUTION,
+	},
+	SC2_FIXED_FORMAT(V4L2_PIX_FMT_MPEG1, codec_mpeg12_ops, 0, 8),
+	SC2_FIXED_FORMAT(V4L2_PIX_FMT_MPEG2, codec_mpeg12_ops, 0, 8),
+	SC2_FIXED_FORMAT(V4L2_PIX_FMT_MPEG4, codec_mpeg4_ops, 3, 8),
+	SC2_FIXED_FORMAT(V4L2_PIX_FMT_VC1_ANNEX_G, codec_vc1_ops, 9, 4),
+	SC2_FIXED_FORMAT(V4L2_PIX_FMT_VC1_ANNEX_L, codec_vc1_ops, 9, 4),
+	SC2_FIXED_FORMAT(V4L2_PIX_FMT_AVS, codec_avs_ops, 10, 8),
+	SC2_FIXED_FORMAT(V4L2_PIX_FMT_MJPEG, codec_mjpeg_ops, 5, 4),
+};
+
+#undef SC2_FIXED_FORMAT
+
+const struct vdec_platform vdec_platform_sc2 = {
+	.formats = vdec_formats_sc2,
+	.num_formats = ARRAY_SIZE(vdec_formats_sc2),
+	.revision = VDEC_REVISION_SC2,
 };
 
 const struct vdec_platform vdec_platform_gxbb = {

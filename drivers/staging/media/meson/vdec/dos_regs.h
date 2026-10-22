@@ -8,6 +8,7 @@
 #define __MESON_VDEC_DOS_REGS_H_
 
 /* DOS registers */
+#define VDEC_ASSIST_CANVAS_BLK32	0x0014
 #define VDEC_ASSIST_AMR1_INT8	0x00b4
 
 #define ASSIST_MBOX1_CLR_REG	0x01d4
@@ -62,6 +63,8 @@
 #define AV_SCRATCH_J		0x274c
 #define AV_SCRATCH_K		0x2750
 #define AV_SCRATCH_L		0x2754
+#define AV_SCRATCH_M		0x2758
+#define AV_SCRATCH_N		0x275c
 
 #define MPEG1_2_REG		0x3004
 #define PIC_HEAD_INFO		0x300c

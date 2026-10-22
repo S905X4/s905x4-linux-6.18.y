@@ -541,6 +541,10 @@ v4l2_m2m_register_media_controller(struct v4l2_m2m_dev *m2m_dev,
  * @m2m_dev: opaque pointer to the internal data to handle M2M context
  *
  * Usually called from driver's ``remove()`` function.
+ * All contexts must be released and new scheduling prevented before calling.
+ * This function may sleep while canceling deferred scheduling work. It must
+ * not run from the device's scheduling callback or with a lock held that the
+ * driver's device_run callback needs.
  */
 void v4l2_m2m_release(struct v4l2_m2m_dev *m2m_dev);
 
@@ -562,6 +566,8 @@ void v4l2_m2m_get(struct v4l2_m2m_dev *m2m_dev);
  * Once the M2M device has no more references, v4l2_m2m_release() will be
  * called automatically. Users of this method should never call
  * v4l2_m2m_release() directly. See v4l2_m2m_get() for more details.
+ * The final put has the same sleepable teardown requirements as
+ * v4l2_m2m_release().
  */
 void v4l2_m2m_put(struct v4l2_m2m_dev *m2m_dev);
 

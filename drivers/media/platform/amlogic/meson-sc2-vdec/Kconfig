@@ -4,6 +4,7 @@ config VIDEO_MESON_SC2_HEVC
 	depends on VIDEO_DEV && HAS_DMA
 	depends on ARCH_MESON || COMPILE_TEST
 	depends on OF && PM && MESON_SM
+	select MESON_SC2_DOS
 	select MEDIA_CONTROLLER
 	select VIDEOBUF2_DMA_CONTIG
 	select V4L2_MEM2MEM_DEV

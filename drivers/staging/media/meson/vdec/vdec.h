@@ -34,6 +34,8 @@ struct amvdec_buffer {
  * @offset: offset in the VIFIFO where the associated packet was written
  * @flags: flags from the v4l2 buffer
  * @used_count: times this timestamp was checked for a match with a dst buffer
+ * @remaining: pictures in this OUTPUT packet not yet displayed or discarded
+ * @end_offset: exclusive byte offset after the prepared packet (modulo 2^32)
  */
 struct amvdec_timestamp {
 	struct list_head list;
@@ -42,6 +44,8 @@ struct amvdec_timestamp {
 	u32 offset;
 	u32 flags;
 	u32 used_count;
+	u32 remaining;
+	u32 end_offset;
 };
 
 struct amvdec_session;
@@ -71,6 +75,12 @@ struct amvdec_core {
 	void __iomem *dos_base;
 	void __iomem *esparser_base;
 	struct regmap *regmap_ao;
+	void __iomem *dmc_base;
+	struct meson_sm_firmware *sm;
+	u32 dmc_before;
+	u32 gates_before;
+	bool quarantined;
+	int irq;
 
 	struct device *dev;
 	struct device *dev_dec;
@@ -133,6 +143,8 @@ struct amvdec_codec_ops {
 	int (*load_extended_firmware)(struct amvdec_session *sess,
 				      const u8 *data, u32 len);
 	u32 (*num_pending_bufs)(struct amvdec_session *sess);
+	int (*prepare_input)(struct amvdec_session *sess,
+			     struct vb2_v4l2_buffer *vbuf, u32 *payload_size);
 	int (*can_recycle)(struct amvdec_core *core);
 	void (*recycle)(struct amvdec_core *core, u32 buf_idx);
 	void (*drain)(struct amvdec_session *sess);
@@ -163,6 +175,10 @@ struct amvdec_format {
 	u32 max_width;
 	u32 max_height;
 	u32 flags;
+	u32 firmware_index;
+	u32 capture_width;
+	u32 capture_height;
+	bool needs_capture;
 
 	struct amvdec_ops *vdec_ops;
 	struct amvdec_codec_ops *codec_ops;
@@ -242,6 +258,26 @@ struct amvdec_session {
 
 	u32 width;
 	u32 height;
+	u32 visible_width;
+	u32 visible_height;
+	u32 crop_left;
+	u32 crop_top;
+	u32 capture_width;
+	u32 capture_height;
+	u32 input_frames;
+	u32 input_size;
+	struct v4l2_fract timeperframe;
+	u32 field;
+	u32 stream_write;
+	u32 stream_offset;
+	bool processor_started;
+	bool aborted;
+	bool eos_completed;
+	bool draining;
+	bool eos_queued;
+	unsigned long drain_deadline;
+	unsigned long drain_empty_since;
+	struct delayed_work drain_work;
 	u32 colorspace;
 	u8 ycbcr_enc;
 	u8 quantization;
@@ -288,5 +324,7 @@ static inline struct amvdec_session *file_to_amvdec_session(struct file *filp)
 }
 
 u32 amvdec_get_output_size(struct amvdec_session *sess);
+u32 amvdec_get_output_width(struct amvdec_session *sess);
+u32 amvdec_get_output_height(struct amvdec_session *sess);
 
 #endif

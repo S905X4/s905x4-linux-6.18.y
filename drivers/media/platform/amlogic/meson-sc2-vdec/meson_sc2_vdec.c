@@ -17,6 +17,7 @@
 #include <media/videobuf2-dma-contig.h>
 
 #include "meson_sc2_hw.h"
+#include "meson_sc2_stateful.h"
 #include "hevc_request_syntax.h"
 #include "av1_request_syntax.h"
 
@@ -38,6 +39,7 @@ struct sc2_dev {
 	struct v4l2_m2m_dev *m2m;
 	struct workqueue_struct *workqueue;
 	struct list_head contexts;
+	struct meson_sc2_stateful *stateful;
 	bool removing;
 };
 
@@ -1094,8 +1096,14 @@ static int sc2_probe(struct platform_device *pdev)
 	ret = media_device_register(&dev->media);
 	if (ret)
 		goto unregister_controller;
+	ret = meson_sc2_stateful_register(&pdev->dev, dev->hw, &dev->v4l2,
+					 &dev->stateful);
+	if (ret)
+		goto unregister_media;
 	platform_set_drvdata(pdev, dev);
 	return 0;
+unregister_media:
+	media_device_unregister(&dev->media);
 unregister_controller:
 	v4l2_m2m_unregister_media_controller(dev->m2m);
 unregister_video:
@@ -1131,6 +1139,7 @@ static void sc2_remove(struct platform_device *pdev)
 		vb2_queue_error(v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx));
 	}
 	mutex_unlock(&dev->lock);
+	meson_sc2_stateful_unregister(dev->stateful);
 	media_device_unregister(&dev->media);
 	v4l2_m2m_unregister_media_controller(dev->m2m);
 	video_unregister_device(&dev->video);
@@ -1156,6 +1165,6 @@ static struct platform_driver sc2_driver = {
 };
 module_platform_driver(sc2_driver);
 
-MODULE_DESCRIPTION("Amlogic SC2 native HEVC/AV1 Request decoder");
+MODULE_DESCRIPTION("Amlogic SC2 HEVC/AV1 Request and VP9/AVS2 stateful decoders");
 MODULE_LICENSE("GPL");
 MODULE_IMPORT_NS("DMA_BUF");

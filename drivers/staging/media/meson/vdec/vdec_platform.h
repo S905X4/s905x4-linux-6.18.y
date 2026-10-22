@@ -18,6 +18,7 @@ enum vdec_revision {
 	VDEC_REVISION_GXM,
 	VDEC_REVISION_G12A,
 	VDEC_REVISION_SM1,
+	VDEC_REVISION_SC2,
 };
 
 struct vdec_platform {
@@ -32,5 +33,6 @@ extern const struct vdec_platform vdec_platform_gxl;
 extern const struct vdec_platform vdec_platform_gxlx;
 extern const struct vdec_platform vdec_platform_g12a;
 extern const struct vdec_platform vdec_platform_sm1;
+extern const struct vdec_platform vdec_platform_sc2;
 
 #endif

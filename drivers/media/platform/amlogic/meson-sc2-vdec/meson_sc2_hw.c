@@ -21,6 +21,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
+#include <linux/soc/amlogic/meson-sc2-dos.h>
 #include <linux/string.h>
 #include <linux/wait.h>
 
@@ -32,6 +33,12 @@
 struct sc2_av1_state;
 static void sc2_av1_reset(struct meson_sc2_hevc_context *ctx);
 static void sc2_av1_release(struct meson_sc2_hevc_context *ctx);
+struct sc2_vp9_state;
+struct sc2_avs2_state;
+static void sc2_vp9_reset(struct meson_sc2_hevc_context *ctx);
+static void sc2_vp9_release(struct meson_sc2_hevc_context *ctx);
+static void sc2_avs2_reset(struct meson_sc2_hevc_context *ctx);
+static void sc2_avs2_release(struct meson_sc2_hevc_context *ctx);
 
 #define SC2_MAX_WIDTH                  4096U
 #define SC2_MAX_HEIGHT                 2304U
@@ -116,6 +123,8 @@ struct meson_sc2_hevc_context {
 	u32 dw8_size;
 	atomic_t aborted;
 	struct sc2_av1_state *av1;
+	struct sc2_vp9_state *vp9;
+	struct sc2_avs2_state *avs2;
 };
 
 struct meson_sc2_hw {
@@ -264,13 +273,16 @@ static int sc2_power_on(struct meson_sc2_hw *hw)
 {
 	int ret;
 
+	ret = meson_sc2_dos_acquire(hw->dev, MESON_SC2_DOS_HEVC);
+	if (ret)
+		return ret;
 	ret = pm_runtime_resume_and_get(hw->dev);
 	if (ret < 0)
-		return ret;
+		goto release_dos;
 	ret = clk_bulk_prepare_enable(ARRAY_SIZE(hw->clocks), hw->clocks);
 	if (ret) {
 		pm_runtime_put_sync_suspend(hw->dev);
-		return ret;
+		goto release_dos;
 	}
 	hw->powered = true;
 	hw->gates_before = sc2_read(hw, SC2_DOS_GCLK_EN3);
@@ -280,6 +292,10 @@ static int sc2_power_on(struct meson_sc2_hw *hw)
 	if (hw->irq_requested)
 		enable_irq(hw->irq);
 	return 0;
+
+release_dos:
+	meson_sc2_dos_release(hw->dev, MESON_SC2_DOS_HEVC);
+	return ret;
 }
 
 static void sc2_power_off(struct meson_sc2_hw *hw)
@@ -296,6 +312,7 @@ static void sc2_power_off(struct meson_sc2_hw *hw)
 	clk_bulk_disable_unprepare(ARRAY_SIZE(hw->clocks), hw->clocks);
 	pm_runtime_put_sync_suspend(hw->dev);
 	hw->powered = false;
+	meson_sc2_dos_release(hw->dev, MESON_SC2_DOS_HEVC);
 }
 
 int meson_sc2_hw_create(struct device *dev, struct meson_sc2_hw **result)
@@ -487,6 +504,8 @@ int meson_sc2_hevc_context_reset(struct meson_sc2_hevc_context *ctx)
 				owner->surface.valid = false;
 		atomic_set(&ctx->aborted, 0);
 		sc2_av1_reset(ctx);
+		sc2_vp9_reset(ctx);
+		sc2_avs2_reset(ctx);
 	}
 	mutex_unlock(&ctx->hw->lock);
 	return ret;
@@ -514,6 +533,8 @@ void meson_sc2_hevc_context_destroy(struct meson_sc2_hevc_context *ctx)
 		}
 	list_del(&ctx->list);
 	sc2_av1_release(ctx);
+	sc2_vp9_release(ctx);
+	sc2_avs2_release(ctx);
 	if (ctx->dw8)
 		dma_free_coherent(hw->dev, ctx->dw8_size + SC2_GUARD_SIZE,
 				  ctx->dw8, ctx->dw8_dma);
@@ -618,19 +639,22 @@ u32 meson_sc2_hevc_fbc_size(u32 width, u32 height)
 	return header + SC2_GUARD_SIZE + body + SC2_GUARD_SIZE;
 }
 
-int meson_sc2_hevc_fbc_bind(struct meson_sc2_hevc_context *ctx,
-			   struct meson_sc2_surface *surface,
-			   u32 width, u32 height, void *cpu, dma_addr_t dma,
-			   size_t size, struct dma_buf *buffer)
+static int sc2_fbc_bind(struct meson_sc2_hevc_context *ctx,
+			struct meson_sc2_surface *surface,
+			u32 width, u32 height, u8 depth, u32 mv_unit, bool dw8,
+			void *cpu, dma_addr_t dma, size_t size,
+			struct dma_buf *buffer)
 {
 	struct meson_sc2_surface s = {};
 	struct sc2_surface_owner *owner;
 	struct meson_sc2_hw *hw;
-	u32 dw_size;
+	u32 dw_size, columns = DIV_ROUND_UP(width, 64);
+	u32 rows = DIV_ROUND_UP(height, 64);
 	int ret = 0;
 
 	if (!ctx || !surface || surface->cpu || !cpu || !buffer ||
-	    !width || !height || width > SC2_MAX_WIDTH || height > SC2_MAX_HEIGHT)
+	    !width || !height || width > SC2_MAX_WIDTH || height > SC2_MAX_HEIGHT ||
+	    (depth != 8 && depth != 10) || (mv_unit != 0x200 && mv_unit != 0x240))
 		return -EINVAL;
 	hw = ctx->hw;
 	/* Scatter headers encode physical PFNs, not relocatable IOVAs. */
@@ -644,14 +668,18 @@ int meson_sc2_hevc_fbc_bind(struct meson_sc2_hevc_context *ctx,
 	s.dma = dma;
 	s.width = width;
 	s.height = height;
-	s.depth = 10;
+	s.depth = depth;
 	s.capture_owned = true;
 	s.header_size = DIV_ROUND_UP(width, 128) * DIV_ROUND_UP(height, 64) * 32;
 	s.header_alloc_size = sc2_fbc_header_alloc_size(width, height);
 	s.body_offset = s.header_alloc_size + SC2_GUARD_SIZE;
 	s.body_size = DIV_ROUND_UP(width, 64) * (ALIGN(height, 64) / 32) * SZ_4K;
-	s.mv_size = ALIGN(DIV_ROUND_UP(width, 64) * DIV_ROUND_UP(height, 64) *
-			  0x200, SZ_64K);
+	/* VP9 cal_mv_buf_size adds a per-column tail on SC2, beyond 0x240
+	 * per superblock. It is not safe to use the older staging MV size.
+	 */
+	s.mv_size = ALIGN(columns * rows * mv_unit +
+			  (mv_unit == 0x240 ? columns * 16 * ((rows >> 3) + (rows & 7)) : 0),
+			  SZ_64K);
 	if (s.body_size / SZ_4K > SC2_MAP_ENTRIES)
 		return -EOVERFLOW;
 	owner = kzalloc(sizeof(*owner), GFP_KERNEL);
@@ -676,7 +704,7 @@ int meson_sc2_hevc_fbc_bind(struct meson_sc2_hevc_context *ctx,
 		goto unlock;
 	}
 	/* Reused per context, never exported or described as ten-bit pixels. */
-	if (ctx->dw8_size < dw_size) {
+	if (dw8 && ctx->dw8_size < dw_size) {
 		void *dw;
 		dma_addr_t dw_dma;
 
@@ -718,6 +746,25 @@ free_mv:
 free_owner:
 	kfree(owner);
 	return ret;
+}
+
+int meson_sc2_hevc_fbc_bind(struct meson_sc2_hevc_context *ctx,
+			   struct meson_sc2_surface *surface,
+			   u32 width, u32 height, void *cpu, dma_addr_t dma,
+			   size_t size, struct dma_buf *buffer)
+{
+	return sc2_fbc_bind(ctx, surface, width, height, 10, 0x200, true,
+			    cpu, dma, size, buffer);
+}
+
+int meson_sc2_modern_fbc_bind(struct meson_sc2_hevc_context *ctx,
+			     struct meson_sc2_surface *surface,
+			     u32 width, u32 height, u8 depth, u32 mv_unit,
+			     void *cpu, dma_addr_t dma, size_t size,
+			     struct dma_buf *buffer)
+{
+	return sc2_fbc_bind(ctx, surface, width, height, depth, mv_unit, false,
+			    cpu, dma, size, buffer);
 }
 
 void meson_sc2_surface_free(struct meson_sc2_hw *hw,
@@ -1488,3 +1535,5 @@ unlock:
 
 /* Shares the IRQ, MMIO mutex, DMA quarantine and power lifetime above. */
 #include "meson_sc2_av1.h"
+#include "meson_sc2_vp9.h"
+#include "meson_sc2_avs2.h"

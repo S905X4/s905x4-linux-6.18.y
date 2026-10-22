@@ -36,4 +36,10 @@ config MESON_MX_SOCINFO
 	  Meson8b and Meson8m2 SoC family information about the type
 	  and version.
 
+config MESON_SC2_DOS
+	tristate
+	depends on ARCH_MESON || COMPILE_TEST
+	help
+	  Shared ownership of SC2 DOS registers and secure firmware state.
+
 endmenu

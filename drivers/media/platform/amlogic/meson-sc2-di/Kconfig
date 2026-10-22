@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config VIDEO_MESON_SC2_DI
+	tristate "Amlogic SC2 field-rate hardware deinterlacer"
+	depends on VIDEO_DEV && ARCH_MESON
+	depends on MESON_CANVAS
+	select V4L2_MEM2MEM_DEV
+	select VIDEOBUF2_DMA_CONTIG
+	help
+	  Native V4L2 M2M SC2 post-engine edge interpolation. Imports linear
+	  NV12M DMABUFs and exports progressive MMAP/DMABUF surfaces at field
+	  rate. This is spatial EI, not the vendor temporal MA/MC algorithm.

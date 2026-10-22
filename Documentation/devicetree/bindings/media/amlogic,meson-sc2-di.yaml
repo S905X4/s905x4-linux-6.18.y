@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/amlogic,meson-sc2-di.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Amlogic SC2 hardware deinterlacer
+
+maintainers:
+  - Linux Media Mailing List <linux-media@vger.kernel.org>
+
+description: |
+  The SC2 DI post engine performs edge-interpolation deinterlacing into
+  memory. It shares the VPU register aperture and power controller with
+  display hardware. The VPU phandle explicitly identifies that supplier;
+  there is no independently reserved overlapping MMIO range or VPU reset.
+  The pre interrupt is described for hardware completeness but unused by
+  the spatial EI implementation. Temporal MA/MC is not exposed.
+  The canvas phandle is also an explicit supplier dependency. Driver
+  removal retains both suppliers until final file and VMA release. A
+  failed DMA drain quarantines ACTIVE buffers and power, blocks new
+  hardware jobs device-wide, and waits for real bus idle before teardown.
+
+properties:
+  compatible:
+    const: amlogic,meson-sc2-di
+  amlogic,vpu:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: SC2 VPU supplier providing VCBUS and PWRCTRL apertures
+  amlogic,canvas:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: Canvas allocator for linear NV12 surfaces
+  interrupts:
+    maxItems: 2
+  interrupt-names:
+    items:
+      - const: pre
+      - const: post
+  clocks:
+    maxItems: 4
+  clock-names:
+    items:
+      - const: vpu
+      - const: vapb
+      - const: clkb
+      - const: intr
+  assigned-clocks:
+    maxItems: 2
+  assigned-clock-parents:
+    maxItems: 2
+  assigned-clock-rates:
+    maxItems: 2
+  power-domains:
+    maxItems: 1
+
+required:
+  - compatible
+  - amlogic,vpu
+  - amlogic,canvas
+  - interrupts
+  - interrupt-names
+  - clocks
+  - clock-names
+  - power-domains
+
+additionalProperties: false

@@ -232,12 +232,42 @@ esparser_write_data(struct amvdec_core *core, dma_addr_t addr, u32 size)
 	return wait_event_interruptible_timeout(wq, search_done, (HZ / 5));
 }
 
+/* SC2 vendor stream_buffer_interface.c publishes a software ring directly.
+ * Preserve timestamp byte offsets without inserting padding between NALs.
+ */
+static int sc2_stream_write(struct amvdec_session *sess, const void *data, u32 len)
+{
+	u32 first = min(len, sess->vififo_size - sess->stream_write);
+
+	if (!data || len >= sess->vififo_size)
+		return -EINVAL;
+	memcpy(sess->vififo_vaddr + sess->stream_write, data, first);
+	memcpy(sess->vififo_vaddr, data + first, len - first);
+	sess->stream_write = (sess->stream_write + len) % sess->vififo_size;
+	sess->stream_offset += len;
+	dma_wmb();
+	amvdec_write_dos(sess->core, VLD_MEM_VIFIFO_WP,
+			 sess->vififo_paddr + sess->stream_write);
+	return 1;
+}
+
 static u32 esparser_vififo_get_free_space(struct amvdec_session *sess)
 {
 	u32 vififo_usage;
 	struct amvdec_ops *vdec_ops = sess->fmt_out->vdec_ops;
 	struct amvdec_core *core = sess->core;
 
+	if (core->platform->revision == VDEC_REVISION_SC2) {
+		u32 read = amvdec_read_dos(core, VLD_MEM_VIFIFO_RP);
+		u32 free;
+
+		if (read < sess->vififo_paddr ||
+		    read >= sess->vififo_paddr + sess->vififo_size)
+			return 0;
+		free = (read - sess->vififo_paddr + sess->vififo_size -
+			sess->stream_write - 1) % sess->vififo_size;
+		return free > 6 * SZ_1K ? free - 6 * SZ_1K : 0;
+	}
 	vififo_usage  = vdec_ops->vififo_level(sess);
 	vififo_usage += amvdec_read_parser(core, PARSER_VIDEO_HOLE);
 	vififo_usage += (6 * SZ_1K); // 6 KiB internal fifo
@@ -258,6 +288,12 @@ int esparser_queue_eos(struct amvdec_core *core, const u8 *data, u32 len)
 	void *eos_vaddr;
 	dma_addr_t eos_paddr;
 	int ret;
+	if (core->platform->revision == VDEC_REVISION_SC2) {
+		if (!core->cur_sess ||
+		    esparser_vififo_get_free_space(core->cur_sess) < len)
+			return -EAGAIN;
+		return sc2_stream_write(core->cur_sess, data, len);
+	}
 
 	eos_vaddr = dma_alloc_coherent(dev, len + SEARCH_PATTERN_LEN,
 				       &eos_paddr, GFP_KERNEL);
@@ -275,8 +311,11 @@ int esparser_queue_eos(struct amvdec_core *core, const u8 *data, u32 len)
 static u32 esparser_get_offset(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
-	u32 offset = amvdec_read_parser(core, PARSER_VIDEO_WP) -
-		     sess->vififo_paddr;
+	u32 offset;
+
+	if (core->platform->revision == VDEC_REVISION_SC2)
+		return sess->stream_offset;
+	offset = amvdec_read_parser(core, PARSER_VIDEO_WP) - sess->vififo_paddr;
 
 	if (offset < sess->last_offset)
 		sess->wrap_count++;
@@ -299,6 +338,13 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 	u32 num_dst_bufs = 0;
 	u32 offset;
 	u32 pad_size;
+	u32 required = codec_ops->prepare_input ? vb2_plane_size(vb, 0) : payload_size;
+
+	if (required >= sess->vififo_size - 6 * SZ_1K) {
+		v4l2_m2m_src_buf_remove_by_buf(sess->m2m_ctx, vbuf);
+		v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
+		return -E2BIG;
+	}
 
 	/*
 	 * When max ref frame is held by VP9, this should be -= 3 to prevent a
@@ -318,13 +364,25 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 		if (esparser_vififo_get_free_space(sess) < payload_size ||
 		    atomic_read(&sess->esparser_queued_bufs) >= num_dst_bufs)
 			return -EAGAIN;
-	} else if (esparser_vififo_get_free_space(sess) < payload_size) {
+	} else if (esparser_vififo_get_free_space(sess) < required) {
 		return -EAGAIN;
 	}
 
+	sess->input_frames = 1;
+	if (codec_ops->prepare_input) {
+		ret = codec_ops->prepare_input(sess, vbuf, &payload_size);
+		if (ret == -EAGAIN)
+			return ret;
+		if (ret) {
+			v4l2_m2m_src_buf_remove_by_buf(sess->m2m_ctx, vbuf);
+			v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
+			return ret;
+		}
+	}
 	v4l2_m2m_src_buf_remove_by_buf(sess->m2m_ctx, vbuf);
 
 	offset = esparser_get_offset(sess);
+	sess->input_size = payload_size;
 
 	ret = amvdec_add_ts(sess, vb->timestamp, vbuf->timecode, offset, vbuf->flags);
 	if (ret) {
@@ -339,6 +397,18 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 	vbuf->field = V4L2_FIELD_NONE;
 	vbuf->sequence = sess->sequence_out++;
 
+	if (core->platform->revision == VDEC_REVISION_SC2) {
+		if (sess->input_frames)
+			atomic_inc(&sess->esparser_queued_bufs);
+		ret = sc2_stream_write(sess, vb2_plane_vaddr(vb, 0), payload_size);
+		if (ret < 0) {
+			if (sess->input_frames)
+				atomic_dec(&sess->esparser_queued_bufs);
+			goto input_error;
+		}
+		v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_DONE);
+		return 0;
+	}
 	if (sess->fmt_out->pixfmt == V4L2_PIX_FMT_VP9) {
 		payload_size = vp9_update_header(core, vb);
 
@@ -351,6 +421,13 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 		}
 	}
 
+input_error:
+	if (ret < 0) {
+		if (sess->input_frames)
+			amvdec_remove_ts(sess, vb->timestamp);
+		v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
+		return ret;
+	}
 	pad_size = esparser_pad_start_code(core, vb, payload_size);
 	ret = esparser_write_data(core, phy, payload_size + pad_size);
 
@@ -376,6 +453,31 @@ void esparser_queue_all_src(struct work_struct *work)
 		container_of(work, struct amvdec_session, esparser_queue_work);
 
 	mutex_lock(&sess->lock);
+	/* A seek/restart can retain the CAPTURE queue. Resume only once every
+	 * surface is owned by VB2 again and its allocated backing is unchanged.
+	 */
+	if ((!sess->should_stop || sess->draining) && !sess->aborted &&
+	    sess->core->platform->revision == VDEC_REVISION_SC2 &&
+	    sess->streamon_cap && sess->status == STATUS_NEEDS_RESUME &&
+	    sess->capture_width == amvdec_get_output_width(sess) &&
+	    sess->capture_height == amvdec_get_output_height(sess) &&
+	    sess->fmt_out->codec_ops->resume &&
+	    v4l2_m2m_num_dst_bufs_ready(sess->m2m_ctx) == sess->num_dst_bufs) {
+		sess->fmt_out->codec_ops->resume(sess);
+		if (!sess->aborted) {
+			if (!sess->processor_started) {
+				amvdec_write_dos(sess->core, MPSR, 1);
+				sess->processor_started = true;
+			}
+			sess->status = STATUS_RUNNING;
+		}
+	}
+	if (sess->should_stop || sess->status == STATUS_STOPPED ||
+	    (sess->core->platform->revision == VDEC_REVISION_SC2 &&
+	     sess->fmt_out->needs_capture && !sess->processor_started)) {
+		mutex_unlock(&sess->lock);
+		return;
+	}
 	v4l2_m2m_for_each_src_buf_safe(sess->m2m_ctx, buf, n) {
 		if (sess->should_stop)
 			break;
@@ -391,6 +493,8 @@ int esparser_power_up(struct amvdec_session *sess)
 	struct amvdec_core *core = sess->core;
 	struct amvdec_ops *vdec_ops = sess->fmt_out->vdec_ops;
 
+	if (core->platform->revision == VDEC_REVISION_SC2)
+		return 0;
 	reset_control_reset(core->esparser_reset);
 	amvdec_write_parser(core, PARSER_CONFIG,
 			    (10 << PS_CFG_PFIFO_EMPTY_CNT_BIT) |

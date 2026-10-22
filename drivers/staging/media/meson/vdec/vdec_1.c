@@ -9,6 +9,11 @@
 
 #include <linux/firmware.h>
 #include <linux/clk.h>
+#include <linux/firmware/meson/meson_sm.h>
+#include <linux/iopoll.h>
+#include <linux/pm_runtime.h>
+#include <linux/soc/amlogic/meson-sc2-dos.h>
+#include <linux/module.h>
 
 #include "vdec_1.h"
 #include "vdec_helpers.h"
@@ -129,6 +134,144 @@ static u32 vdec_1_vififo_level(struct amvdec_session *sess)
 	return amvdec_read_dos(core, VLD_MEM_VIFIFO_LEVEL);
 }
 
+/* SC2 uses genpd and the factory secure loader, not the GX AO sequence. */
+static int vdec_1_sc2_drain(struct amvdec_core *core)
+{
+	u32 value;
+	int ret;
+
+	amvdec_write_dos(core, ASSIST_MBOX1_MASK, 0);
+	amvdec_write_dos(core, MPSR, 0);
+	amvdec_write_dos(core, CPSR, 0);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL, 0);
+	ret = readl_poll_timeout(core->dos_base + IMEM_DMA_CTRL, value,
+				 !(value & BIT(15)), 10, 100000);
+	if (ret)
+		return ret;
+	ret = readl_poll_timeout(core->dos_base + LMEM_DMA_CTRL, value,
+				 !(value & BIT(15)), 10, 100000);
+	if (ret)
+		return ret;
+	writel(readl(core->dmc_base) & ~BIT(21), core->dmc_base);
+	return readl_poll_timeout(core->dmc_base + 0xf0, value,
+				 value & BIT(21), 10, 100000);
+}
+
+static int vdec_1_sc2_stop(struct amvdec_session *sess)
+{
+	struct amvdec_core *core = sess->core;
+	int ret = vdec_1_sc2_drain(core);
+
+	disable_irq(core->irq);
+	if (ret) {
+		core->quarantined = true;
+		__module_get(THIS_MODULE);
+		dev_crit(core->dev, "VDEC DMA not idle: retaining DOS lease, power and all buffers; reboot required\n");
+		return ret;
+	}
+	amvdec_write_dos(core, DOS_SW_RESET0, BIT(12) | BIT(11));
+	amvdec_write_dos(core, DOS_SW_RESET0, 0);
+	amvdec_read_dos(core, DOS_SW_RESET0);
+	if (sess->priv)
+		sess->fmt_out->codec_ops->stop(sess);
+	writel((readl(core->dmc_base) & ~BIT(21)) |
+	       (core->dmc_before & BIT(21)), core->dmc_base);
+	amvdec_write_dos(core, DOS_GCLK_EN0, core->gates_before);
+	clk_disable_unprepare(core->vdec_1_clk);
+	pm_runtime_put_sync_suspend(core->dev);
+	meson_sc2_dos_release(core->dev, MESON_SC2_DOS_VDEC);
+	sess->processor_started = false;
+	return 0;
+}
+
+static int vdec_1_sc2_start(struct amvdec_session *sess)
+{
+	struct amvdec_core *core = sess->core;
+	s32 firmware_status = -EIO;
+	int ret;
+	if (!IS_REACHABLE(CONFIG_MESON_SM))
+		return -EOPNOTSUPP;
+
+	ret = meson_sc2_dos_acquire(core->dev, MESON_SC2_DOS_VDEC);
+	if (ret)
+		return ret;
+	ret = pm_runtime_resume_and_get(core->dev);
+	if (ret < 0)
+		goto release;
+	ret = clk_set_rate(core->vdec_1_clk, 800000000);
+	if (ret)
+		goto suspend;
+	ret = clk_prepare_enable(core->vdec_1_clk);
+	if (ret)
+		goto suspend;
+	core->gates_before = amvdec_read_dos(core, DOS_GCLK_EN0);
+	core->dmc_before = readl(core->dmc_base);
+	amvdec_write_dos(core, DOS_GCLK_EN0, core->gates_before | 0x3ff);
+	amvdec_read_dos(core, DOS_GCLK_EN0);
+	if (amvdec_read_dos(core, MPSR) || amvdec_read_dos(core, CPSR) ||
+	    (amvdec_read_dos(core, IMEM_DMA_CTRL) & BIT(15)) ||
+	    (amvdec_read_dos(core, LMEM_DMA_CTRL) & BIT(15))) {
+		ret = -EBUSY;
+		goto restore_gates;
+	}
+	ret = vdec_1_sc2_drain(core);
+	if (ret)
+		goto stop;
+	amvdec_write_dos(core, DOS_SW_RESET0,
+			 BIT(3) | BIT(4) | BIT(5) | BIT(6) | BIT(7) | BIT(8) | BIT(9));
+	amvdec_write_dos(core, DOS_SW_RESET0, 0);
+	amvdec_read_dos(core, DOS_SW_RESET0);
+	amvdec_write_dos(core, DOS_MEM_PD_VDEC, 0);
+	writel(readl(core->dmc_base) | BIT(21), core->dmc_base);
+	amvdec_write_dos(core, DOS_VDEC_MCRCC_STALL_CTRL, 0);
+	amvdec_write_dos(core, GCLK_EN, 0x3ff);
+	amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(31));
+	vdec_1_stbuf_power_up(sess);
+	/* Vendor no-parser mode uses byte endian 7 and software write pointer. */
+	amvdec_write_dos_bits(core, VLD_MEM_VIFIFO_CONTROL, 7 << 3);
+	ret = meson_sm_call(core->sm, SM_VIDEO_FW_LOAD, &firmware_status,
+			    sess->fmt_out->firmware_index, 0, 0, 0, 0);
+	if (!ret && firmware_status)
+		ret = -EIO;
+	if (ret)
+		goto stop;
+	ret = sess->fmt_out->codec_ops->start(sess);
+	if (ret)
+		goto stop;
+	amvdec_write_dos(core, ASSIST_MBOX1_CLR_REG, 1);
+	amvdec_write_dos(core, ASSIST_MBOX1_MASK, 1);
+	if (sess->aborted) {
+		ret = -EIO;
+		goto stop;
+	}
+	if (sess->pixfmt_cap == V4L2_PIX_FMT_NV12M)
+		amvdec_write_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(17));
+	else
+		amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(17));
+	amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(16));
+	enable_irq(core->irq);
+	if (!sess->fmt_out->needs_capture ||
+	    (sess->streamon_cap && sess->status != STATUS_NEEDS_RESUME)) {
+		amvdec_write_dos(core, MPSR, 1);
+		sess->processor_started = true;
+	}
+	return 0;
+
+stop:
+	/* Balance the IRQ disable performed by stop, also before first launch. */
+	enable_irq(core->irq);
+	vdec_1_sc2_stop(sess);
+	return ret;
+restore_gates:
+	amvdec_write_dos(core, DOS_GCLK_EN0, core->gates_before);
+	clk_disable_unprepare(core->vdec_1_clk);
+suspend:
+	pm_runtime_put_sync_suspend(core->dev);
+release:
+	meson_sc2_dos_release(core->dev, MESON_SC2_DOS_VDEC);
+	return ret;
+}
+
 static void __vdec_1_stop(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
@@ -166,6 +309,8 @@ static int vdec_1_stop(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
 
+	if (core->platform->revision == VDEC_REVISION_SC2)
+		return vdec_1_sc2_stop(sess);
 	__vdec_1_stop(sess);
 
 	clk_disable_unprepare(core->vdec_1_clk);
@@ -178,6 +323,8 @@ static int vdec_1_start(struct amvdec_session *sess)
 	int ret;
 	struct amvdec_core *core = sess->core;
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
+	if (core->platform->revision == VDEC_REVISION_SC2)
+		return vdec_1_sc2_start(sess);
 
 	/* Configure the vdec clk to the maximum available */
 	clk_set_rate(core->vdec_1_clk, 666666666);

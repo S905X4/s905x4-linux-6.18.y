@@ -284,6 +284,41 @@
 			status = "disabled";
 		};
 
+		/* VDEC1 uses mailbox1 and domain3; all DOS access is arbitrated
+		 * with the HEVC/AV1 engine, which owns the aperture reservation.
+		 */
+		vdec_1: video-decoder-stateful@fe320000 {
+			compatible = "amlogic,meson-sc2-vdec";
+			reg = <0 0xfe320000 0 0x10000>,
+			      <0 0xfe036000 0 0x100>;
+			reg-names = "dos", "dmc";
+			interrupts = <GIC_SPI 92 IRQ_TYPE_EDGE_RISING>;
+			interrupt-names = "vdec";
+			clocks = <&clkc CLKID_DOS>, <&clkc CLKID_VDEC_MUX>;
+			clock-names = "dos", "vdec_1";
+			power-domains = <&pwrc PWRC_SC2_DOS_VDEC_ID>;
+			amlogic,canvas = <&canvas>;
+			status = "disabled";
+		};
+
+		di: deinterlacer {
+			compatible = "amlogic,meson-sc2-di";
+			amlogic,vpu = <&vpu>;
+			amlogic,canvas = <&canvas>;
+			interrupts = <GIC_SPI 203 IRQ_TYPE_EDGE_RISING>,
+				     <GIC_SPI 202 IRQ_TYPE_EDGE_RISING>;
+			interrupt-names = "pre", "post";
+			clocks = <&clkc CLKID_VPU>, <&clkc CLKID_VAPB>,
+				 <&clkc CLKID_VPU_CLKB>, <&clkc CLKID_VPU_INTR>;
+			clock-names = "vpu", "vapb", "clkb", "intr";
+			assigned-clocks = <&clkc CLKID_VPU_CLKB_TMP_MUX>,
+					  <&clkc CLKID_VPU_CLKB>;
+			assigned-clock-parents = <&clkc CLKID_VPU>, <0>;
+			assigned-clock-rates = <0>, <666666667>;
+			power-domains = <&pwrc PWRC_SC2_VPU_HDMI_ID>;
+			status = "disabled";
+		};
+
 		gpu: gpu@fe400000 {
 			compatible = "amlogic,meson-sc2-mali", "arm,mali-bifrost";
 			reg = <0 0xfe400000 0 0x4000>;

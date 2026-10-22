@@ -289,20 +289,29 @@ please make a proposal on the linux-media mailing list.
       - **Local proposed ABI**, not an existing standard Linux 6.18 format or
         an upstream-assigned identifier. Losslessly compressed ten-bit YUV
         4:2:0 pixels in Amlogic FBC scatter layout. See the local contract below.
+    * .. _V4L2-PIX-FMT-AMLOGIC-FBC8:
+
+      - ``V4L2_PIX_FMT_AMLOGIC_FBC8``
+      - 'AMF8'
+      - **Local proposed ABI**. Losslessly compressed eight-bit YUV 4:2:0
+        pixels in Amlogic FBC scatter layout. The allocation/ownership rules
+        below also apply, but the DRM format is ``DRM_FORMAT_YUV420_8BIT`` and
+        the modifier includes ``AMLOGIC_FBC_OPTION_MEM_SAVING``.
 
 .. raw:: latex
 
     \normalsize
 
-Local proposed Amlogic ten-bit scatter capture contract
-=====================================================
+Local proposed Amlogic scatter capture contract
+==============================================
 
 ``AMF0`` is a local producer/consumer contract for the SC2 HEVC Main10 Request
-decoder and its matching FFmpeg DRM PRIME formatter. It is not NV12, P010,
-Raspberry Pi NC30, AM21C, or a portable compressed file representation.
-Applications must negotiate this exact fourcc; Main8 and AV1 continue to use
-NV12. Main10 requests paired with NV12 CAPTURE, and Main8 requests paired with
-AMF0 CAPTURE, are rejected rather than silently reducing sample depth.
+decoder and stateful VP9/AVS2 ten-bit decoding with their matching FFmpeg DRM
+PRIME formatter. ``AMF8`` is the stateful VP9/AVS2 eight-bit counterpart. These
+are not NV12, P010, Raspberry Pi NC30, AM21C, or portable compressed files.
+Applications must negotiate the exact fourcc for the parsed depth; ten-bit
+input paired with eight-bit CAPTURE is rejected rather than truncated.
+HEVC Main8 and AV1 Request capture remain NV12, unchanged by the stateful node.
 
 CAPTURE uses the multi-planar API with one memory plane, zero ``bytesperline``
 (there is no CPU-linear row pitch), and width/height rounded up to 64 pixels.
@@ -319,8 +328,16 @@ padded dimensions ``W`` and ``H``, the allocation layout is:
 * Every 4096-byte body page is in this same allocation. The decoder programs
   its private MMU map with only these pages; unused entries alias an owned
   body page. Hardware-generated header entries contain physical page addresses.
-* Motion vectors and a reused eight-bit double-write scratch surface remain
-  decoder-private. Neither is part of the exported ten-bit picture.
+* Motion vectors remain decoder-private. The HEVC Main10 Request backend
+  additionally uses a private eight-bit double-write scratch surface; it is
+  never the exported ten-bit picture. Stateful VP9/AVS2 disable double-write.
+
+``AMF8`` uses the same conservative 4096-byte-per-block allocation capacity,
+but hardware compression lengths are 3200 bytes per 64x32 block and the
+eight-bit memory-saving mode is enabled. Its DRM modifier must carry that
+mode. ``AMF0`` retains all ten sample bits with memory-saving mode disabled;
+the modifier must not claim memory-saving merely because a CAPTURE allocation
+can hold both representations.
 
 This implementation accepts driver-allocated MMAP CAPTURE buffers, exported
 with ``VIDIOC_EXPBUF``. Imported DMABUF CAPTURE is not supported for AMF0.

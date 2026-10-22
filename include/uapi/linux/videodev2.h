@@ -775,6 +775,9 @@ struct v4l2_pix_format {
 #define V4L2_PIX_FMT_H264_SLICE v4l2_fourcc('S', '2', '6', '4') /* H264 parsed slices */
 #define V4L2_PIX_FMT_HEVC_SLICE v4l2_fourcc('S', '2', '6', '5') /* HEVC parsed slices */
 #define V4L2_PIX_FMT_AV1_FRAME v4l2_fourcc('A', 'V', '1', 'F') /* AV1 parsed frame */
+/* Local proposed stateful AVS ABI; see pixfmt-compressed. */
+#define V4L2_PIX_FMT_AVS       v4l2_fourcc('A', 'V', 'S', '0') /* AVS/AVS+ */
+#define V4L2_PIX_FMT_AVS2      v4l2_fourcc('A', 'V', 'S', '2') /* AVS2 */
 #define V4L2_PIX_FMT_SPK      v4l2_fourcc('S', 'P', 'K', '0') /* Sorenson Spark */
 #define V4L2_PIX_FMT_RV30     v4l2_fourcc('R', 'V', '3', '0') /* RealVideo 8 */
 #define V4L2_PIX_FMT_RV40     v4l2_fourcc('R', 'V', '4', '0') /* RealVideo 9 & 10 */
@@ -823,6 +826,7 @@ struct v4l2_pix_format {
 #define V4L2_PIX_FMT_HEXTILE  v4l2_fourcc('H', 'X', 'T', 'L') /* Hextile compressed */
 /* Local proposed ABI, not an upstream-assigned format: see pixfmt-reserved. */
 #define V4L2_PIX_FMT_AMLOGIC_FBC10 v4l2_fourcc('A', 'M', 'F', '0') /* Amlogic scatter FBC 10-bit 4:2:0 */
+#define V4L2_PIX_FMT_AMLOGIC_FBC8 v4l2_fourcc('A', 'M', 'F', '8') /* Amlogic scatter FBC 8-bit 4:2:0 */
 
 /* 10bit raw packed, 32 bytes for every 25 pixels, last LSB 6 bits unused */
 #define V4L2_PIX_FMT_IPU3_SBGGR10	v4l2_fourcc('i', 'p', '3', 'b') /* IPU3 packed 10-bit BGGR bayer */

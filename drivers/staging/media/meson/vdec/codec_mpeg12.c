@@ -6,6 +6,7 @@
 
 #include <media/v4l2-mem2mem.h>
 #include <media/videobuf2-dma-contig.h>
+#include <media/v4l2-event.h>
 
 #include "codec_mpeg12.h"
 #include "dos_regs.h"
@@ -80,10 +81,12 @@ static int codec_mpeg12_start(struct amvdec_session *sess)
 		goto free_mpeg12;
 	}
 
-	ret = amvdec_set_canvases(sess, (u32[]){ AV_SCRATCH_0, 0 },
+	if (core->platform->revision != VDEC_REVISION_SC2) {
+		ret = amvdec_set_canvases(sess, (u32[]){ AV_SCRATCH_0, 0 },
 					(u32[]){ 8, 0 });
-	if (ret)
-		goto free_workspace;
+		if (ret)
+			goto free_workspace;
+	}
 
 	amvdec_write_dos(core, POWER_CTL_VLD, BIT(4));
 	amvdec_write_dos(core, MREG_CO_MV_START,
@@ -102,6 +105,8 @@ static int codec_mpeg12_start(struct amvdec_session *sess)
 
 	sess->keyframe_found = 1;
 	sess->priv = mpeg12;
+	if (core->platform->revision == VDEC_REVISION_SC2)
+		amvdec_src_change(sess, sess->width, sess->height, 8);
 
 	return 0;
 
@@ -112,6 +117,13 @@ free_mpeg12:
 	kfree(mpeg12);
 
 	return ret;
+}
+
+static void codec_mpeg12_resume(struct amvdec_session *sess)
+{
+	if (amvdec_set_canvases(sess, (u32[]){ AV_SCRATCH_0, 0 },
+				(u32[]){ 8, 0 }))
+		amvdec_abort(sess);
 }
 
 static int codec_mpeg12_stop(struct amvdec_session *sess)
@@ -173,9 +185,34 @@ static irqreturn_t codec_mpeg12_threaded_isr(struct amvdec_session *sess)
 		return IRQ_HANDLED;
 
 	/* Unclear what this means */
-	if ((reg & GENMASK(23, 17)) == GENMASK(23, 17))
+	if ((reg & GENMASK(23, 17)) == GENMASK(23, 17)) {
+		if (sess->should_stop)
+			amvdec_eos(sess);
 		goto end;
+	}
 
+	if (core->platform->revision == VDEC_REVISION_SC2) {
+		u32 width = amvdec_read_dos(core, MREG_PIC_WIDTH);
+		u32 height = amvdec_read_dos(core, MREG_PIC_HEIGHT);
+
+		if (!width || !height || width > sess->fmt_out->max_width ||
+		    height > sess->fmt_out->max_height) {
+			amvdec_abort(sess);
+			return IRQ_HANDLED;
+		}
+		if (width != sess->width || height != sess->height) {
+			const struct v4l2_event ev = {
+				.type = V4L2_EVENT_SOURCE_CHANGE,
+				.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION,
+			};
+
+			sess->width = width;
+			sess->height = height;
+			sess->visible_width = width;
+			sess->visible_height = height;
+			v4l2_event_queue_fh(&sess->fh, &ev);
+		}
+	}
 	pic_info = amvdec_read_dos(core, MREG_PIC_INFO);
 	is_progressive = pic_info & PICINFO_PROG;
 
@@ -183,6 +220,7 @@ static irqreturn_t codec_mpeg12_threaded_isr(struct amvdec_session *sess)
 		field = (pic_info & PICINFO_TOP_FIRST) ?
 			V4L2_FIELD_INTERLACED_TB :
 			V4L2_FIELD_INTERLACED_BT;
+	sess->field = field;
 
 	codec_mpeg12_update_dar(sess);
 	buffer_index = ((reg & 0xf) - 1) & 7;
@@ -207,4 +245,5 @@ struct amvdec_codec_ops codec_mpeg12_ops = {
 	.can_recycle = codec_mpeg12_can_recycle,
 	.recycle = codec_mpeg12_recycle,
 	.eos_sequence = codec_mpeg12_eos_sequence,
+	.resume = codec_mpeg12_resume,
 };

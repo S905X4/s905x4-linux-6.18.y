@@ -274,6 +274,27 @@ Compressed Formats
         of macroblocks to decode a full corresponding frame to the matching
         capture buffer.
 
+    * .. _V4L2-PIX-FMT-AVS:
+
+      - ``V4L2_PIX_FMT_AVS``
+      - 'AVS0'
+      - **Local proposed ABI**, not an upstream-assigned identifier. AVS and
+        AVS+ compressed elementary video, with start codes and sequence headers
+        preserved. The stateful decoder parses stream parameters; no Request
+        controls or BSP vframe metadata are part of this format.
+
+    * .. _V4L2-PIX-FMT-AVS2:
+
+      - ``V4L2_PIX_FMT_AVS2``
+      - 'AVS2'
+      - **Local proposed ABI**, not an upstream-assigned identifier. AVS2
+        start-code-delimited access units, including preceding sequence/header
+        data. Each OUTPUT buffer contains at most one coded picture. The
+        stateful decoder reports parsed geometry and sample depth using the
+        source-change event before CAPTURE allocation. Reordered CAPTURE
+        timestamps refer to their original OUTPUT access units, not decode
+        order. There are no AVS2 Request controls in this ABI.
+
 .. raw:: latex
 
     \normalsize
