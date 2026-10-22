@@ -6,6 +6,7 @@
 #include <linux/kernel.h>
 #include <linux/math64.h>
 #include <linux/types.h>
+#include "meson_sc2_vp9_api.h"
 
 /* VP9 PROB processing defines */
 #define VP9_PARTITION_START      0
