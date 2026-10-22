@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config VIDEO_MESON_SC2_HEVC
+	tristate "Amlogic SC2 stateless HEVC/AV1 decoder"
+	depends on VIDEO_DEV && HAS_DMA
+	depends on ARCH_MESON || COMPILE_TEST
+	depends on OF && PM && MESON_SM
+	select MEDIA_CONTROLLER
+	select VIDEOBUF2_DMA_CONTIG
+	select V4L2_MEM2MEM_DEV
+	select VIDEOBUF2_V4L2
+	help
+	  Native V4L2 Request decoder for progressive, single-layer HEVC Main/Main10
+	  and AV1 Main8 on Amlogic SC2, using one serialized hardware engine.
+	  HEVC OUTPUT contains frame-based native slice controls and raw NAL
+	  units without start codes. AV1 OUTPUT tile offsets address coded tile
+	  bytes; sequence/frame headers are rebuilt from native AV1 controls.
+	  Main8 CAPTURE is contiguous NV12. HEVC Main10 CAPTURE uses the local
+	  proposed AMF0 Amlogic scatter-FBC ABI with exported vb2-owned header/body
+	  storage, not an eight-bit preview. AV1 supports fixed-size <=1920x1088 streams,
+	  64x64 superblocks and <=256 tiles; film grain, superresolution,
+	  intrabc, frame IDs, timing models and nonidentity global motion are
+	  rejected explicitly.
+	  The original SC2 secure firmware must already have been preloaded.
+	  Full-depth compressed scanout requires matching DRM PRIME userspace.

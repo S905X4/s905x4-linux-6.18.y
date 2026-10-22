@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/amlogic,meson-sc2-hevc-decoder.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Amlogic SC2 HEVC and AV1 video decoder
+
+maintainers:
+  - hiper25 <whydonit@gmail.com>
+
+description: |
+  SC2 HEVC/AV1 decoder using native stateless V4L2 Request controls and
+  original SC2 secure decoder firmware. Both codecs use the same DOS
+  processor, parser, MMU, reconstruction engine and mailbox; they must
+  not bind independently competing drivers to this register aperture.
+  The DMC aperture and bridge register are shared with other SoC clients;
+  the driver modifies only the decoder-owned request/reset bits.
+
+properties:
+  compatible:
+    const: amlogic,meson-sc2-hevc-decoder
+
+  reg:
+    items:
+      - description: DOS decoder register aperture
+      - description: DMC request and completion registers
+      - description: Decoder bridge reset register
+
+  reg-names:
+    items:
+      - const: dos
+      - const: dmc
+      - const: bridge
+
+  interrupts:
+    maxItems: 1
+
+  clocks:
+    items:
+      - description: DOS bus gate
+      - description: HEVC front clock
+      - description: HEVC back clock
+
+  clock-names:
+    items:
+      - const: dos
+      - const: hevcf_mux
+      - const: hevcb_mux
+
+  power-domains:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - clocks
+  - clock-names
+  - power-domains
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/amlogic,sc2-clkc.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/power/meson-sc2-power.h>
+
+    video-decoder@fe320000 {
+        compatible = "amlogic,meson-sc2-hevc-decoder";
+        reg = <0xfe320000 0x10000>, <0xfe036000 0x100>, <0xfe002054 0x4>;
+        reg-names = "dos", "dmc", "bridge";
+        interrupts = <GIC_SPI 91 IRQ_TYPE_EDGE_RISING>;
+        clocks = <&clkc CLKID_DOS>, <&clkc CLKID_HEVCF_MUX>,
+                 <&clkc CLKID_HEVCB_MUX>;
+        clock-names = "dos", "hevcf_mux", "hevcb_mux";
+        power-domains = <&pwrc PWRC_SC2_DOS_HEVC_ID>;
+    };

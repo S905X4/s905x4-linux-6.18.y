@@ -269,6 +269,21 @@
 			};
 		};
 
+		/* HEVC and AV1 share this DOS engine, power domain and mailbox. */
+		vdec: video-decoder@fe320000 {
+			compatible = "amlogic,meson-sc2-hevc-decoder";
+			reg = <0 0xfe320000 0 0x10000>,
+			      <0 0xfe036000 0 0x100>,
+			      <0 0xfe002054 0 0x4>;
+			reg-names = "dos", "dmc", "bridge";
+			interrupts = <GIC_SPI 91 IRQ_TYPE_EDGE_RISING>;
+			clocks = <&clkc CLKID_DOS>, <&clkc CLKID_HEVCF_MUX>,
+				 <&clkc CLKID_HEVCB_MUX>;
+			clock-names = "dos", "hevcf_mux", "hevcb_mux";
+			power-domains = <&pwrc PWRC_SC2_DOS_HEVC_ID>;
+			status = "disabled";
+		};
+
 		gpu: gpu@fe400000 {
 			compatible = "amlogic,meson-sc2-mali", "arm,mali-bifrost";
 			reg = <0 0xfe400000 0 0x4000>;

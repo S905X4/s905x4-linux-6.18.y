@@ -282,6 +282,75 @@ please make a proposal on the linux-media mailing list.
       - Compressed format used by Nuvoton NPCM video driver. This format is
         defined in Remote Framebuffer Protocol (RFC 6143, chapter 7.7.4 Hextile
         Encoding).
+    * .. _V4L2-PIX-FMT-AMLOGIC-FBC10:
+
+      - ``V4L2_PIX_FMT_AMLOGIC_FBC10``
+      - 'AMF0'
+      - **Local proposed ABI**, not an existing standard Linux 6.18 format or
+        an upstream-assigned identifier. Losslessly compressed ten-bit YUV
+        4:2:0 pixels in Amlogic FBC scatter layout. See the local contract below.
+
 .. raw:: latex
 
     \normalsize
+
+Local proposed Amlogic ten-bit scatter capture contract
+=====================================================
+
+``AMF0`` is a local producer/consumer contract for the SC2 HEVC Main10 Request
+decoder and its matching FFmpeg DRM PRIME formatter. It is not NV12, P010,
+Raspberry Pi NC30, AM21C, or a portable compressed file representation.
+Applications must negotiate this exact fourcc; Main8 and AV1 continue to use
+NV12. Main10 requests paired with NV12 CAPTURE, and Main8 requests paired with
+AMF0 CAPTURE, are rejected rather than silently reducing sample depth.
+
+CAPTURE uses the multi-planar API with one memory plane, zero ``bytesperline``
+(there is no CPU-linear row pitch), and width/height rounded up to 64 pixels.
+The coded rectangle is returned by ``V4L2_SEL_TGT_COMPOSE``. For the returned
+padded dimensions ``W`` and ``H``, the allocation layout is:
+
+* The FBC header starts at byte zero, with length
+  ``ceil(W / 128) * ceil(H / 64) * 32`` bytes.
+* Round that length up to 4096 bytes, then reserve a 4096-byte guard.
+* The body starts there and contains ``(W / 64) * (H / 32) * 4096`` bytes,
+  followed by a second 4096-byte guard. ``sizeimage`` includes both guards.
+* Every 4096-byte body page is in this same allocation. The decoder programs
+  its private MMU map with only these pages; unused entries alias an owned
+  body page. Hardware-generated header entries contain physical page addresses.
+* Motion vectors and a reused eight-bit double-write scratch surface remain
+  decoder-private. Neither is part of the exported ten-bit picture.
+
+This implementation accepts driver-allocated MMAP CAPTURE buffers, exported
+with ``VIDIOC_EXPBUF``. Imported DMABUF CAPTURE is not supported for AMF0.
+The complete header/body allocation is owned by vb2, so every embedded body
+page remains alive while an exported DMABUF/DRM framebuffer holds a reference,
+including after STREAMOFF, REQBUFS(0), or closing the decoder. Private motion
+vectors may be released after the hardware is drained without invalidating
+scanout. If drain cannot prove idle, the existing fatal quarantine retains
+the capture DMABUF and all decoder-private memory rather than freeing DMA
+targets. A queued/reused CAPTURE buffer must not still be in use by a display.
+
+The matching DRM descriptor has one object, one layer, and one plane:
+``DRM_FORMAT_YUV420_10BIT`` ('YU10'), object index zero, header offset zero,
+pitch ``W`` pixels, and
+``DRM_FORMAT_MOD_AMLOGIC_FBC(AMLOGIC_FBC_LAYOUT_SCATTER, 0)``. In particular,
+``AMLOGIC_FBC_OPTION_MEM_SAVING`` is not set for Main10, and the encoder's
+memory-saving bit is cleared. The single object's size includes all referenced
+body storage, not just the header. CPU mapping/transfer as linear YUV samples
+is unsupported; the matching FFmpeg implementation rejects such mapping.
+Its ``sw_format`` describes logical YUV420P10 sample depth, not this layout.
+
+Limits and safety boundary: progressive, single-layer HEVC 4:2:0 with matching
+ten-bit luma/chroma, coded sizes 64..4096 by 64..2304 (even dimensions), CTU
+16/32/64, at most 16 references and 12 by 8 tiles. Capture storage must have
+identity physical/DMA addresses; an IOMMU-backed device is rejected. The
+absolute PFNs make the format nonrelocatable and a buffer dump cannot be
+imported as a new framebuffer. Modifying a decoded header can redirect FBC
+hardware reads, so this local ABI is intended only for trusted media/DRM
+clients; lifetime ownership does not validate hostile userspace header edits
+or establish DMA isolation. References are resolved by request timestamps
+within the owning decoder context, never by userspace-provided DMA addresses.
+
+Production Main10 Request decoding, exported-FD teardown lifetime, low-two-bit
+fidelity, and actual DRM/Kodi presentation require integration and hardware
+acceptance; source support alone is not evidence of those results.
