@@ -736,11 +736,19 @@ static void meson_overlay_atomic_disable(struct drm_plane *plane,
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
 		writel_relaxed(0, priv->io_base + _REG(VD1_BLEND_SRC_CTRL));
 		writel_relaxed(0, priv->io_base + _REG(VD2_BLEND_SRC_CTRL));
-		writel_relaxed(0, priv->io_base + _REG(VD1_IF0_GEN_REG + 0x17b0));
-		writel_relaxed(0, priv->io_base + _REG(VD2_IF0_GEN_REG + 0x17b0));
+		writel_relaxed(0, priv->io_base +
+			       _REG(meson_viu_mif_reg(priv, VD1_IF0_GEN_REG)));
+		writel_relaxed(0, priv->io_base +
+			       _REG(meson_viu_mif_reg(priv, VD2_IF0_GEN_REG)));
 	} else
 		writel_bits_relaxed(VPP_VD1_POSTBLEND | VPP_VD1_PREBLEND, 0,
 				    priv->io_base + _REG(VPP_MISC));
+
+	if (priv->sc2) {
+		writel_relaxed(0, priv->io_base +
+			       _REG(meson_viu_afbc_reg(priv, AFBC_ENABLE)));
+		meson_viu_vd1_afbc_select(priv, false);
+	}
 
 }
 

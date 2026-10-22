@@ -9,6 +9,73 @@
 #ifndef __MESON_VIU_H
 #define __MESON_VIU_H
 
+#include "meson_drv.h"
+#include "meson_registers.h"
+
+/* Translate legacy word addresses; VPP blending and scaling do not move. */
+static inline unsigned int meson_viu_mif_reg(struct meson_drm *priv,
+					  unsigned int reg)
+{
+	if (!priv->sc2) {
+		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
+			if (reg == VD1_IF0_GEN_REG3)
+				return 0x3216;
+			if (reg == VD2_IF0_GEN_REG3)
+				return 0x3236;
+			return reg + 0x17b0;
+		}
+		return reg;
+	}
+
+	/* GEN through FIFO retain their order in both SC2 MIF banks. */
+	if (reg >= VD1_IF0_GEN_REG && reg <= VD1_IF0_LUMA_FIFO_SIZE)
+		return SC2_VD1_IF0_GEN_REG + reg - VD1_IF0_GEN_REG;
+	if (reg >= VD2_IF0_GEN_REG && reg <= VD2_IF0_LUMA_FIFO_SIZE)
+		return SC2_VD2_IF0_GEN_REG + reg - VD2_IF0_GEN_REG;
+
+	switch (reg) {
+	case VD1_IF0_RANGE_MAP_Y:
+		return SC2_VD1_IF0_RANGE_MAP_Y;
+	case VD1_IF0_RANGE_MAP_CB:
+		return SC2_VD1_IF0_RANGE_MAP_CB;
+	case VD1_IF0_RANGE_MAP_CR:
+		return SC2_VD1_IF0_RANGE_MAP_CR;
+	case VD1_IF0_GEN_REG2:
+		return SC2_VD1_IF0_GEN_REG2;
+	case VD1_IF0_GEN_REG3:
+		return SC2_VD1_IF0_GEN_REG3;
+	case VIU_VD1_FMT_CTRL:
+		return SC2_VIU_VD1_FMT_CTRL;
+	case VIU_VD1_FMT_W:
+		return SC2_VIU_VD1_FMT_W;
+	case VD2_IF0_RANGE_MAP_Y:
+		return SC2_VD2_IF0_RANGE_MAP_Y;
+	case VD2_IF0_RANGE_MAP_CB:
+		return SC2_VD2_IF0_RANGE_MAP_CB;
+	case VD2_IF0_RANGE_MAP_CR:
+		return SC2_VD2_IF0_RANGE_MAP_CR;
+	case VD2_IF0_GEN_REG2:
+		return SC2_VD2_IF0_GEN_REG2;
+	case VD2_IF0_GEN_REG3:
+		return SC2_VD2_IF0_GEN_REG3;
+	case VIU_VD2_FMT_CTRL:
+		return SC2_VIU_VD2_FMT_CTRL;
+	case VIU_VD2_FMT_W:
+		return SC2_VIU_VD2_FMT_W;
+	default:
+		return reg;
+	}
+}
+
+static inline unsigned int meson_viu_afbc_reg(struct meson_drm *priv,
+					   unsigned int reg)
+{
+	/* AFBC_ENABLE through AFBC_VD_CFMT_H have identical field order. */
+	return priv->sc2 ? SC2_AFBC_ENABLE + reg - AFBC_ENABLE : reg;
+}
+
+void meson_viu_vd1_afbc_select(struct meson_drm *priv, bool afbc);
+
 /* OSDx_BLKx_CFG */
 #define OSD_MALI_SRC_EN		BIT(30)
 

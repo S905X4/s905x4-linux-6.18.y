@@ -411,6 +411,21 @@ void meson_viu_gxm_disable_osd1_afbc(struct meson_drm *priv)
 			    priv->io_base + _REG(VIU_MISC_CTRL1));
 }
 
+void meson_viu_vd1_afbc_select(struct meson_drm *priv, bool afbc)
+{
+	u32 mask = VD1_AXI_SEL_AFBC | AFBC_VD1_SEL;
+
+	if (priv->sc2) {
+		/* TL1+ also selects the AFBC memory path with bit 22. */
+		mask |= VD1_AFBC0_MEM_SEL;
+		writel_bits_relaxed(mask, afbc ? mask : 0,
+				    priv->io_base + _REG(VD1_AFBCD0_MISC_CTRL));
+	} else {
+		writel_relaxed(afbc ? mask : 0,
+			       priv->io_base + _REG(VD1_AFBCD0_MISC_CTRL));
+	}
+}
+
 void meson_viu_init(struct meson_drm *priv)
 {
 	uint32_t reg;
@@ -460,12 +475,17 @@ void meson_viu_init(struct meson_drm *priv)
 	/* di_mif0_en=0 mif0_to_vpp_en=0 di_mad_en=0 and afbc vd1 set=0*/
 	writel_bits_relaxed(VIU_CTRL0_VD1_AFBC_MASK, 0,
 			    priv->io_base + _REG(VIU_MISC_CTRL0));
-	writel_relaxed(0, priv->io_base + _REG(AFBC_ENABLE));
+	writel_relaxed(0, priv->io_base +
+		       _REG(meson_viu_afbc_reg(priv, AFBC_ENABLE)));
+	if (priv->sc2)
+		meson_viu_vd1_afbc_select(priv, false);
 
 	writel_relaxed(0x00FF00C0,
-			priv->io_base + _REG(VD1_IF0_LUMA_FIFO_SIZE));
+		       priv->io_base + _REG(priv->sc2 ?
+			       SC2_VD1_IF0_LUMA_FIFO_SIZE : VD1_IF0_LUMA_FIFO_SIZE));
 	writel_relaxed(0x00FF00C0,
-			priv->io_base + _REG(VD2_IF0_LUMA_FIFO_SIZE));
+		       priv->io_base + _REG(priv->sc2 ?
+			       SC2_VD2_IF0_LUMA_FIFO_SIZE : VD2_IF0_LUMA_FIFO_SIZE));
 
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
 		u32 val = (u32)VIU_OSD_BLEND_REORDER(0, 1) |
