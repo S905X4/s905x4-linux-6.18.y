@@ -71,9 +71,10 @@ struct meson_av1_syntax_error {
  * Feed software comparison decoders normalized requests in decode order too.
  *
  * Native ABI omissions are canonicalized: full (not reduced-still) header;
- * no timing/decoder model/frame IDs (caller must validate reference identity
- * via timestamps), one unfiltered operating point, level 31, selectable screen
- * tools/integer MV, explicit seven reference indices and explicit frame size.
+ * no timing/decoder model/frame IDs (caller must validate source current,
+ * reference and display IDs before resolving references via timestamps), one
+ * unfiltered operating point, level 31, selectable screen tools/integer MV,
+ * explicit seven reference indices and explicit frame size.
  * These choices preserve tile entropy and reference semantics, not original
  * packaging, timing, conformance level or missing-reference detection. Native
  * color range is retained; color description/chroma position are unspecified

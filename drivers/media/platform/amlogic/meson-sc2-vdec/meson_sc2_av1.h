@@ -689,7 +689,6 @@ static int sc2_av1_validate(struct meson_sc2_hevc_context *ctx,
                      V4L2_AV1_SEQUENCE_FLAG_SUBSAMPLING_Y)) !=
                     (V4L2_AV1_SEQUENCE_FLAG_SUBSAMPLING_X |
                      V4L2_AV1_SEQUENCE_FLAG_SUBSAMPLING_Y) ||
-        f->current_frame_id ||
         (f->flags & (V4L2_AV1_FRAME_FLAG_ALLOW_INTRABC |
                      V4L2_AV1_FRAME_FLAG_BUFFER_REMOVAL_TIME_PRESENT)) ||
         f->tile_info.tile_cols > 64 ||

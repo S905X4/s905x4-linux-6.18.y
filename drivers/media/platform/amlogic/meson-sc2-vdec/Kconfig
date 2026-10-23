@@ -19,7 +19,8 @@ config VIDEO_MESON_SC2_HEVC
 	  proposed AMF0 Amlogic scatter-FBC ABI with exported vb2-owned header/body
 	  storage, not an eight-bit preview. AV1 supports fixed output size
 	  <=1920x1088, superresolution, 64x64 superblocks and <=256 tiles.
-	  Film grain, intrabc, frame IDs, timing models and nonidentity global
-	  motion are rejected explicitly.
+	  Source frame IDs must be validated by userspace before normalization.
+	  Film grain, intrabc, timing models and nonidentity global motion are
+	  rejected explicitly.
 	  The original SC2 secure firmware must already have been preloaded.
 	  Full-depth compressed scanout requires matching DRM PRIME userspace.
