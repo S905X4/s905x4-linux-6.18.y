@@ -18,7 +18,7 @@ config VIDEO_MESON_SC2_HEVC
 	  Main8 CAPTURE is contiguous NV12. HEVC Main10 CAPTURE uses the local
 	  proposed AMF0 Amlogic scatter-FBC ABI with exported vb2-owned header/body
 	  storage, not an eight-bit preview. AV1 supports fixed output size
-	  <=1920x1088, superresolution, 64x64 superblocks and <=256 tiles.
+	  <=1920x1088, superresolution, 64x64/128x128 superblocks and <=256 tiles.
 	  Source frame IDs must be validated by userspace before normalization.
 	  Film grain, intrabc, timing models and nonidentity global motion are
 	  rejected explicitly.

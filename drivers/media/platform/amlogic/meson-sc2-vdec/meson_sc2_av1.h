@@ -683,8 +683,7 @@ static int sc2_av1_validate(struct meson_sc2_hevc_context *ctx,
         f->upscaled_width < width || f->upscaled_width > 1920 ||
         (f->upscaled_width & 1) ||
         (s->flags & (V4L2_AV1_SEQUENCE_FLAG_MONO_CHROME |
-                     V4L2_AV1_SEQUENCE_FLAG_FILM_GRAIN_PARAMS_PRESENT |
-                     V4L2_AV1_SEQUENCE_FLAG_USE_128X128_SUPERBLOCK)) ||
+                     V4L2_AV1_SEQUENCE_FLAG_FILM_GRAIN_PARAMS_PRESENT)) ||
         (s->flags & (V4L2_AV1_SEQUENCE_FLAG_SUBSAMPLING_X |
                      V4L2_AV1_SEQUENCE_FLAG_SUBSAMPLING_Y)) !=
                     (V4L2_AV1_SEQUENCE_FLAG_SUBSAMPLING_X |
@@ -846,7 +845,8 @@ static void sc2_av1_program(struct meson_sc2_hevc_context *ctx,
     sc2_write(hw, A1_SAO_CTRL9, sc2_read(hw, A1_SAO_CTRL9) | BIT(1));
     sc2_write(hw, HEVC_SAO_CTRL5,
               (sc2_read(hw, HEVC_SAO_CTRL5) | BIT(14)) & ~(0xffU << 16));
-    sc2_write(hw, HEVC_SAO_CTRL0, 6);
+    sc2_write(hw, HEVC_SAO_CTRL0, 6 + !!(job->syntax->sequence->flags &
+                              V4L2_AV1_SEQUENCE_FLAG_USE_128X128_SUPERBLOCK));
     sc2_write(hw, HEVC_CM_BODY_START_ADDR, lower_32_bits(s->dma + s->body_offset));
     sc2_write(hw, HEVC_CM_HEADER_START_ADDR, lower_32_bits(s->dma));
     sc2_write(hw, A1_FGS_TABLE, av1_workspace(st, GRAIN) + st->current_slot * 0x2000);
@@ -898,7 +898,9 @@ static int sc2_av1_run(struct meson_sc2_hevc_context *ctx,
             for (i = 0; i < 128; i++)
                 p[i] = le16_to_cpu(raw[(i & ~3U) + 3 - (i & 3)]);
             if (status == 0xf2) {
-                if (++sequences != 1 || p[0] || p[56] != 8 || (p[57] & BIT(6)) ||
+                if (++sequences != 1 || p[0] || p[56] != 8 ||
+                    !!(p[57] & BIT(6)) !=
+                    !!(job->syntax->sequence->flags & V4L2_AV1_SEQUENCE_FLAG_USE_128X128_SUPERBLOCK) ||
                     !!(p[57] & BIT(15)) !=
                     !!(job->syntax->sequence->flags & V4L2_AV1_SEQUENCE_FLAG_ENABLE_SUPERRES))
                     return -EPROTO;
@@ -919,8 +921,9 @@ static int sc2_av1_run(struct meson_sc2_hevc_context *ctx,
             continue;
         }
         if (status == 0xe0) {
-            if (headers != 1 || sc2_read(hw, HEVC_ASSIST_SCRATCH_2) !=
-                DIV_ROUND_UP(st->width, 64) * DIV_ROUND_UP(st->height, 64) ||
+            /* Multi-tile firmware counts need not equal the geometric SB count.
+             * The donor requires PIC_END plus a nonzero completed-LCU count. */
+            if (headers != 1 || !sc2_read(hw, HEVC_ASSIST_SCRATCH_2) ||
                 sc2_read(hw, HEVC_SHIFT_BYTE_COUNT) > length + SC2_INPUT_PADDING ||
                 (sc2_read(hw, A1_MMU_STATUS) >> 16) >
                     DIV_ROUND_UP(job->output.destination->body_size, SZ_4K))
