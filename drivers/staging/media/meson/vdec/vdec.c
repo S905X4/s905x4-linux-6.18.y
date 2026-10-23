@@ -1012,9 +1012,12 @@ static int
 vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 {
 	struct amvdec_session *sess = file_to_amvdec_session(file);
-	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
+	struct amvdec_codec_ops *codec_ops;
 	struct device *dev = sess->core->dev;
 	int ret;
+
+	guard(mutex)(&sess->lock);
+	codec_ops = sess->fmt_out->codec_ops;
 
 	ret = v4l2_m2m_ioctl_try_decoder_cmd(file, fh, cmd);
 	if (ret)

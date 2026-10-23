@@ -193,7 +193,7 @@ static bool mpeg4_terminal_empty(struct amvdec_session *sess)
 {
 	struct codec_mpeg4 *m = sess->priv;
 
-	return m->eos_queued && sess->draining && !m->running &&
+	return m->empty && m->eos_queued && sess->draining && !m->running &&
 		m->job_end == m->committed &&
 		m->committed == READ_ONCE(sess->stream_offset) &&
 		amvdec_read_dos(sess->core, VLD_MEM_VIFIFO_WP) ==
@@ -331,8 +331,7 @@ static int mpeg4_run(struct amvdec_session *sess)
 		m->display = -1;
 	}
 	if (!m->ready || m->running || m->terminal || !m->committed ||
-	    (m->empty && m->job_end == m->committed) ||
-	    (m->eos_queued && mpeg4_timestamps_empty(sess))) {
+	    (m->empty && m->job_end == m->committed)) {
 		dev_dbg(core->dev,
 			"MPEG4 defer ready=%u running=%u terminal=%u empty=%u committed=%08x job=%08x retained=%08x decoded=%u pending=%u\n",
 			m->ready, m->running, m->terminal, m->empty,
@@ -585,10 +584,6 @@ static irqreturn_t mpeg4_threaded_isr(struct amvdec_session *sess)
 		ret = mpeg4_swap(sess, true);
 		if (ret)
 			goto fail;
-		if (mpeg4_terminal_empty(sess)) {
-			m->empty = true;
-			m->terminal = true;
-		}
 	}
 	ret = mpeg4_run(sess);
 	if (ret)

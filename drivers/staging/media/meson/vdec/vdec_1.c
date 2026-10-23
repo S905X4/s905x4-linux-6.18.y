@@ -202,9 +202,10 @@ static int vdec_1_sc2_stop(struct amvdec_session *sess)
 
 	if (core->quarantined)
 		return -EIO;
-	ret = vdec_1_sc2_drain(core);
-
 	disable_irq(core->irq);
+	if (sess->priv && sess->fmt_out->codec_ops->quiesce)
+		sess->fmt_out->codec_ops->quiesce(sess);
+	ret = vdec_1_sc2_drain(core);
 	if (ret) {
 		core->quarantined = true;
 		__module_get(THIS_MODULE);

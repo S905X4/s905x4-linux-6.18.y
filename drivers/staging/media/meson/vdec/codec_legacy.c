@@ -527,13 +527,19 @@ static int avs_start(struct amvdec_session *s)
 }
 static int mjpeg_start(struct amvdec_session *s) { return legacy_start(s, LEGACY_MJPEG); }
 
+static void legacy_quiesce(struct amvdec_session *sess)
+{
+	struct codec_legacy *ctx = sess->priv;
+
+	WRITE_ONCE(ctx->failed, true);
+	cancel_delayed_work_sync(&ctx->recycle_work);
+}
+
 static int legacy_stop(struct amvdec_session *sess)
 {
 	struct codec_legacy *ctx = sess->priv;
 
 	legacy_debug_state(sess, "stopping");
-	WRITE_ONCE(ctx->failed, true);
-	cancel_delayed_work_sync(&ctx->recycle_work);
 	/* Engine stop has already drained VDEC's DMC channel before freeing DMA. */
 	if (ctx->workspace) {
 		dma_free_coherent(sess->core->dev, ctx->workspace_size,
@@ -1699,6 +1705,7 @@ static const u8 *mjpeg_end(u32 *len) { *len = sizeof(mjpeg_eos); return mjpeg_eo
 
 struct amvdec_codec_ops codec_vc1_ops = {
 	.start = vc1_start, .stop = legacy_stop,
+	.quiesce = legacy_quiesce,
 	.resume = legacy_resume, .prepare_input = vc1_prepare_input,
 	.isr = legacy_isr, .threaded_isr = legacy_threaded_isr,
 	.can_recycle = legacy_can_recycle, .recycle = legacy_recycle,
@@ -1706,6 +1713,7 @@ struct amvdec_codec_ops codec_vc1_ops = {
 };
 struct amvdec_codec_ops codec_avs_ops = {
 	.start = avs_start, .stop = legacy_stop,
+	.quiesce = legacy_quiesce,
 	.manages_processor = true,
 	.resume = legacy_resume,
 	.queue_input = avsm_queue_input,
@@ -1715,6 +1723,7 @@ struct amvdec_codec_ops codec_avs_ops = {
 };
 struct amvdec_codec_ops codec_mjpeg_ops = {
 	.start = mjpeg_start, .stop = legacy_stop,
+	.quiesce = legacy_quiesce,
 	.resume = legacy_resume,
 	.prepare_input = mjpeg_prepare_input,
 	.isr = legacy_isr, .threaded_isr = legacy_threaded_isr,

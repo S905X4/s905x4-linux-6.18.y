@@ -124,6 +124,8 @@ struct amvdec_ops {
  *
  * @start: mandatory call when the codec needs to initialize
  * @stop: mandatory call when the codec needs to stop
+ * @quiesce: stop asynchronous producers after IRQ synchronization and before
+ *           the final SC2 DMA drain; session mutex held, no backing freed
  * @load_extended_firmware: optional call to load additional firmware bits
  * @num_pending_bufs: optional call to get the number of dst buffers on hold
  * @queue_input: optional codec-owned framed submission; consumes OUTPUT on
@@ -152,6 +154,7 @@ struct amvdec_codec_ops {
 	bool manages_processor;
 	int (*start)(struct amvdec_session *sess);
 	int (*stop)(struct amvdec_session *sess);
+	void (*quiesce)(struct amvdec_session *sess);
 	int (*load_extended_firmware)(struct amvdec_session *sess,
 				      const u8 *data, u32 len);
 	u32 (*num_pending_bufs)(struct amvdec_session *sess);
