@@ -17,9 +17,9 @@ config VIDEO_MESON_SC2_HEVC
 	  bytes; sequence/frame headers are rebuilt from native AV1 controls.
 	  Main8 CAPTURE is contiguous NV12. HEVC Main10 CAPTURE uses the local
 	  proposed AMF0 Amlogic scatter-FBC ABI with exported vb2-owned header/body
-	  storage, not an eight-bit preview. AV1 supports fixed-size <=1920x1088 streams,
-	  64x64 superblocks and <=256 tiles; film grain, superresolution,
-	  intrabc, frame IDs, timing models and nonidentity global motion are
-	  rejected explicitly.
+	  storage, not an eight-bit preview. AV1 supports fixed output size
+	  <=1920x1088, superresolution, 64x64 superblocks and <=256 tiles.
+	  Film grain, intrabc, frame IDs, timing models and nonidentity global
+	  motion are rejected explicitly.
 	  The original SC2 secure firmware must already have been preloaded.
 	  Full-depth compressed scanout requires matching DRM PRIME userspace.

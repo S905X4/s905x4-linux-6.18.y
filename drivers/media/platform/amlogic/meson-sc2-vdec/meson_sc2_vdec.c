@@ -745,7 +745,7 @@ static int sc2_decode_av1(struct sc2_ctx *ctx, struct vb2_v4l2_buffer *src,
 		V4L2_CID_STATELESS_AV1_SEQUENCE)->p_req.p;
 	syntax.frame = sc2_request_control(hdl, V4L2_CID_STATELESS_AV1_FRAME)->p_req.p;
 	frame = syntax.frame;
-	if (frame->frame_width_minus_1 + 1 != ctx->source_fmt.width ||
+	if (frame->upscaled_width != ctx->source_fmt.width ||
 	    frame->frame_height_minus_1 + 1 != ctx->source_fmt.height)
 		return -EINVAL;
 	tiles = sc2_request_control(hdl, V4L2_CID_STATELESS_AV1_TILE_GROUP_ENTRY);
