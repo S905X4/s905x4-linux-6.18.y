@@ -258,7 +258,9 @@ static u32 esparser_vififo_get_free_space(struct amvdec_session *sess)
 	struct amvdec_core *core = sess->core;
 
 	if (core->platform->revision == VDEC_REVISION_SC2) {
-		u32 read = amvdec_read_dos(core, VLD_MEM_VIFIFO_RP);
+		u32 read = sess->fmt_out->codec_ops->input_read_pointer ?
+			sess->fmt_out->codec_ops->input_read_pointer(sess) :
+			amvdec_read_dos(core, VLD_MEM_VIFIFO_RP);
 		u32 free;
 
 		if (read < sess->vififo_paddr ||
@@ -340,6 +342,9 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 	u32 pad_size;
 	u32 required = codec_ops->prepare_input ? vb2_plane_size(vb, 0) : payload_size;
 
+	if (codec_ops->queue_input)
+		return codec_ops->queue_input(sess, vbuf);
+
 	if (required >= sess->vififo_size - 6 * SZ_1K) {
 		v4l2_m2m_src_buf_remove_by_buf(sess->m2m_ctx, vbuf);
 		v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
@@ -406,6 +411,8 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 				atomic_dec(&sess->esparser_queued_bufs);
 			goto input_error;
 		}
+		if (codec_ops->input_committed)
+			codec_ops->input_committed(sess, offset, payload_size);
 		v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_DONE);
 		return 0;
 	}
@@ -465,7 +472,8 @@ void esparser_queue_all_src(struct work_struct *work)
 	    v4l2_m2m_num_dst_bufs_ready(sess->m2m_ctx) == sess->num_dst_bufs) {
 		sess->fmt_out->codec_ops->resume(sess);
 		if (!sess->aborted) {
-			if (!sess->processor_started) {
+			if (!sess->processor_started &&
+			    !sess->fmt_out->codec_ops->manages_processor) {
 				amvdec_write_dos(sess->core, MPSR, 1);
 				sess->processor_started = true;
 			}
@@ -474,7 +482,8 @@ void esparser_queue_all_src(struct work_struct *work)
 	}
 	if (sess->should_stop || sess->status == STATUS_STOPPED ||
 	    (sess->core->platform->revision == VDEC_REVISION_SC2 &&
-	     sess->fmt_out->needs_capture && !sess->processor_started)) {
+		 sess->fmt_out->needs_capture && !sess->processor_started &&
+		 !sess->fmt_out->codec_ops->manages_processor)) {
 		mutex_unlock(&sess->lock);
 		return;
 	}

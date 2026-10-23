@@ -279,9 +279,15 @@ Compressed Formats
       - ``V4L2_PIX_FMT_AVS``
       - 'AVS0'
       - **Local proposed ABI**, not an upstream-assigned identifier. AVS and
-        AVS+ compressed elementary video, with start codes and sequence headers
-        preserved. The stateful decoder parses stream parameters; no Request
-        controls or BSP vframe metadata are part of this format.
+        AVS+ start-code-delimited elementary access units, including preceding
+        sequence, extension and user-data headers. Each picture-bearing OUTPUT
+        buffer contains one complete coded picture (both fields when field
+        coded); a header-only OUTPUT buffer has no presentation or timestamp
+        token. The format does not advertise continuous-bytestream parsing.
+        The stateful decoder parses stream parameters; reordered CAPTURE
+        timestamps belong to their original OUTPUT pictures, not to a later
+        input that releases a delayed reference. No Request controls or BSP
+        vframe metadata are part of this format.
 
     * .. _V4L2-PIX-FMT-AVS2:
 

@@ -4,6 +4,7 @@
  * Author: Maxime Jourdan <mjourdan@baylibre.com>
  */
 
+#include <linux/iopoll.h>
 #include <media/v4l2-mem2mem.h>
 #include <media/videobuf2-dma-contig.h>
 #include <media/v4l2-event.h>
@@ -11,6 +12,8 @@
 #include "codec_mpeg12.h"
 #include "dos_regs.h"
 #include "vdec_helpers.h"
+#include "esparser.h"
+#include "vdec_1.h"
 
 #define SIZE_WORKSPACE		SZ_128K
 /* Offset substracted by the firmware from the workspace paddr */
@@ -81,12 +84,10 @@ static int codec_mpeg12_start(struct amvdec_session *sess)
 		goto free_mpeg12;
 	}
 
-	if (core->platform->revision != VDEC_REVISION_SC2) {
-		ret = amvdec_set_canvases(sess, (u32[]){ AV_SCRATCH_0, 0 },
-					(u32[]){ 8, 0 });
-		if (ret)
-			goto free_workspace;
-	}
+	ret = amvdec_set_canvases(sess, (u32[]){ AV_SCRATCH_0, 0 },
+				(u32[]){ 8, 0 });
+	if (ret)
+		goto free_workspace;
 
 	amvdec_write_dos(core, POWER_CTL_VLD, BIT(4));
 	amvdec_write_dos(core, MREG_CO_MV_START,
@@ -98,15 +99,14 @@ static int codec_mpeg12_start(struct amvdec_session *sess)
 	amvdec_write_dos(core, M4_CONTROL_REG, 0);
 	amvdec_write_dos(core, MREG_BUFFERIN, 0);
 	amvdec_write_dos(core, MREG_BUFFEROUT, 0);
-	amvdec_write_dos(core, MREG_CMD, (sess->width << 16) | sess->height);
+	amvdec_write_dos(core, MREG_CMD,
+			 (sess->width << 16) | sess->height);
 	amvdec_write_dos(core, MREG_ERROR_COUNT, 0);
 	amvdec_write_dos(core, MREG_FATAL_ERROR, 0);
 	amvdec_write_dos(core, MREG_WAIT_BUFFER, 0);
 
 	sess->keyframe_found = 1;
 	sess->priv = mpeg12;
-	if (core->platform->revision == VDEC_REVISION_SC2)
-		amvdec_src_change(sess, sess->width, sess->height, 8);
 
 	return 0;
 
@@ -183,6 +183,9 @@ static irqreturn_t codec_mpeg12_threaded_isr(struct amvdec_session *sess)
 	reg = amvdec_read_dos(core, MREG_BUFFEROUT);
 	if (!reg)
 		return IRQ_HANDLED;
+	dev_dbg(core->dev, "MPEG12 IRQ output=%08x pic=%08x offset=%08x\n",
+		reg, amvdec_read_dos(core, MREG_PIC_INFO),
+		amvdec_read_dos(core, MREG_FRAME_OFFSET));
 
 	/* Unclear what this means */
 	if ((reg & GENMASK(23, 17)) == GENMASK(23, 17)) {
@@ -191,28 +194,6 @@ static irqreturn_t codec_mpeg12_threaded_isr(struct amvdec_session *sess)
 		goto end;
 	}
 
-	if (core->platform->revision == VDEC_REVISION_SC2) {
-		u32 width = amvdec_read_dos(core, MREG_PIC_WIDTH);
-		u32 height = amvdec_read_dos(core, MREG_PIC_HEIGHT);
-
-		if (!width || !height || width > sess->fmt_out->max_width ||
-		    height > sess->fmt_out->max_height) {
-			amvdec_abort(sess);
-			return IRQ_HANDLED;
-		}
-		if (width != sess->width || height != sess->height) {
-			const struct v4l2_event ev = {
-				.type = V4L2_EVENT_SOURCE_CHANGE,
-				.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION,
-			};
-
-			sess->width = width;
-			sess->height = height;
-			sess->visible_width = width;
-			sess->visible_height = height;
-			v4l2_event_queue_fh(&sess->fh, &ev);
-		}
-	}
 	pic_info = amvdec_read_dos(core, MREG_PIC_INFO);
 	is_progressive = pic_info & PICINFO_PROG;
 
@@ -246,4 +227,734 @@ struct amvdec_codec_ops codec_mpeg12_ops = {
 	.recycle = codec_mpeg12_recycle,
 	.eos_sequence = codec_mpeg12_eos_sequence,
 	.resume = codec_mpeg12_resume,
+};
+
+/* SC2 uses the separately authenticated MPEG12 MULTI firmware. Registers here
+ * are byte offsets of the vendor vmpeg12_multi/VLD register definitions.
+ * Its SCRATCH8 is input mode, NEVER the SINGLE buffer-recycle mailbox.
+ */
+#define MPEG12_MULTI_WORKSPACE SZ_256K
+#define MPEG12_MULTI_CC_SIZE (5 * SZ_1K)
+#define MPEG12_MULTI_BUFFERS 8
+#define MPEG12_MULTI_SWAP_ADDR 0x3154
+#define MPEG12_MULTI_SWAP_CTL 0x3158
+#define MPEG12_MULTI_F_CODE 0x3008
+#define MPEG12_MULTI_SLICE_TYPE 0x3010
+#define MPEG12_MULTI_MB_INFO 0x30b0
+#define MPEG12_MULTI_VCOP_CTRL 0x3800
+#define MPEG12_MULTI_REC_CANVAS 0x26c8
+#define MPEG12_MULTI_ANC2_CANVAS (ANC0_CANVAS_ADDR + 8)
+#define MPEG12_MULTI_PIC_DONE 1
+#define MPEG12_MULTI_DATA_EMPTY 2
+#define MPEG12_MULTI_SEQ_END 3
+#define MPEG12_MULTI_DATA_REQUEST 4
+#define MPEG12_MULTI_PIC_ERROR BIT(31)
+#define MPEG12_MULTI_PIC_TYPE GENMASK(17, 16)
+#define MPEG12_MULTI_TYPE_P BIT(16)
+#define MPEG12_MULTI_TYPE_B BIT(17)
+#define MPEG12_MULTI_SEQ_EXT BIT(31)
+#define MPEG12_MULTI_SEQ_PROG BIT(16)
+
+static const u32 mpeg12_context_regs[] = {
+	MREG_SEQ_INFO, MREG_PIC_WIDTH, MREG_PIC_HEIGHT, MPEG1_2_REG,
+	PIC_HEAD_INFO, MPEG12_MULTI_F_CODE, MPEG12_MULTI_SLICE_TYPE,
+	MPEG12_MULTI_MB_INFO, MPEG12_MULTI_VCOP_CTRL, AV_SCRATCH_H,
+};
+
+struct mpeg12_multi_picture {
+	u64 timestamp;
+	struct v4l2_timecode timecode;
+	u32 flags;
+	u32 field;
+	u32 offset;
+	bool pending;
+	bool displayed;
+	bool packet_done;
+};
+
+struct mpeg12_multi {
+	struct mutex lock;
+	void *workspace;
+	dma_addr_t workspace_dma;
+	void *cc;
+	dma_addr_t cc_dma;
+	void *swap;
+	dma_addr_t swap_dma;
+	u32 context[ARRAY_SIZE(mpeg12_context_regs)];
+	u32 canvas[MPEG12_MULTI_BUFFERS];
+	struct mpeg12_multi_picture picture[MPEG12_MULTI_BUFFERS];
+	int refs[2];
+	int active;
+	int error;
+	u32 committed;
+	u32 job_end;
+	u32 retained;
+	u32 swap_wrap;
+	u32 userdata_wp;
+	u32 width;
+	u32 height;
+	u32 decoded;
+	u32 pending;
+	u32 eos_start;
+	bool ready;
+	bool running;
+	bool context_valid;
+	bool swap_valid;
+	bool empty;
+	bool eos_queued;
+	bool terminal;
+};
+
+static int mpeg12_multi_run(struct amvdec_session *sess);
+
+static int mpeg12_multi_pause(struct amvdec_session *sess)
+{
+	struct mpeg12_multi *m = sess->priv;
+	struct amvdec_core *core = sess->core;
+	u32 value;
+	int ret;
+
+	amvdec_write_dos(core, MPSR, 0);
+	amvdec_write_dos(core, CPSR, 0);
+	sess->processor_started = false;
+	m->running = false;
+	ret = read_poll_timeout(amvdec_read_dos, value, !(value & BIT(15)),
+				10, 100000, false, core, IMEM_DMA_CTRL);
+	if (ret)
+		return ret;
+	ret = read_poll_timeout(amvdec_read_dos, value, !(value & BIT(15)),
+				10, 100000, false, core, LMEM_DMA_CTRL);
+	if (ret)
+		return ret;
+	/* amvdec_stop(): reset the stopped processors, preserving IMEM. */
+	amvdec_read_dos(core, DOS_SW_RESET0);
+	amvdec_read_dos(core, DOS_SW_RESET0);
+	amvdec_read_dos(core, DOS_SW_RESET0);
+	amvdec_write_dos(core, DOS_SW_RESET0, BIT(12) | BIT(11));
+	amvdec_write_dos(core, DOS_SW_RESET0, 0);
+	amvdec_read_dos(core, DOS_SW_RESET0);
+	amvdec_read_dos(core, DOS_SW_RESET0);
+	amvdec_read_dos(core, DOS_SW_RESET0);
+	return 0;
+}
+
+static int mpeg12_multi_swap(struct amvdec_session *sess, bool save)
+{
+	struct mpeg12_multi *m = sess->priv;
+	struct amvdec_core *core = sess->core;
+	u32 value, rp;
+	int ret;
+
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL, save ? BIT(15) : 0);
+	amvdec_write_dos(core, MPEG12_MULTI_SWAP_ADDR, m->swap_dma);
+	amvdec_write_dos(core, MPEG12_MULTI_SWAP_CTL, save ? 3 : 1);
+	ret = read_poll_timeout(amvdec_read_dos, value, !(value & BIT(7)),
+				10, 100000, false, core, MPEG12_MULTI_SWAP_CTL);
+	if (ret)
+		return ret;
+	amvdec_write_dos(core, MPEG12_MULTI_SWAP_CTL, 0);
+	if (save) {
+		rp = amvdec_read_dos(core, VLD_MEM_VIFIFO_RP);
+		if (rp < sess->vififo_paddr ||
+		    rp >= sess->vififo_paddr + sess->vififo_size)
+			return -EIO;
+		WRITE_ONCE(m->retained, rp - sess->vififo_paddr);
+		m->swap_wrap = amvdec_read_dos(core, VLD_MEM_VIFIFO_WRAP_COUNT);
+		m->swap_valid = true;
+	} else {
+		amvdec_write_dos(core, VLD_MEM_VIFIFO_WRAP_COUNT, m->swap_wrap);
+	}
+	return 0;
+}
+
+static bool mpeg12_multi_timestamps_empty(struct amvdec_session *sess)
+{
+	unsigned long flags;
+	bool empty;
+
+	spin_lock_irqsave(&sess->ts_spinlock, flags);
+	empty = list_empty(&sess->timestamps);
+	spin_unlock_irqrestore(&sess->ts_spinlock, flags);
+	return empty;
+}
+
+/* Bind the decoded picture now; references are presented later. No nearest
+ * offset, most-recent-PTS fallback, or second lookup at final flush is valid.
+ */
+static int mpeg12_multi_timestamp(struct amvdec_session *sess,
+				struct mpeg12_multi_picture *pic, u32 offset)
+{
+	struct amvdec_timestamp *ts;
+	unsigned long flags;
+	int ret = -ENOENT;
+
+	spin_lock_irqsave(&sess->ts_spinlock, flags);
+	list_for_each_entry(ts, &sess->timestamps, list) {
+		if (!ts->remaining ||
+		    (u32)(offset - ts->offset) >= (u32)(ts->end_offset - ts->offset))
+			continue;
+		pic->timestamp = ts->ts;
+		pic->timecode = ts->tc;
+		pic->flags = ts->flags;
+		pic->packet_done = !--ts->remaining;
+		if (pic->packet_done) {
+			list_del(&ts->list);
+			kfree(ts);
+		}
+		ret = 0;
+		break;
+	}
+	spin_unlock_irqrestore(&sess->ts_spinlock, flags);
+	return ret;
+}
+
+static int mpeg12_multi_present(struct amvdec_session *sess, int index)
+{
+	struct mpeg12_multi *m = sess->priv;
+	struct mpeg12_multi_picture *pic;
+	struct vb2_v4l2_buffer *vb;
+	u32 size = amvdec_get_output_size(sess);
+
+	if (index < 0 || index >= MPEG12_MULTI_BUFFERS)
+		return -EINVAL;
+	pic = &m->picture[index];
+	if (!pic->pending || pic->displayed || !m->pending)
+		return -EPROTO;
+	vb = v4l2_m2m_dst_buf_remove_by_idx(sess->m2m_ctx,
+					 sess->fw_idx_to_vb2_idx[index]);
+	if (!vb)
+		return -ENOBUFS;
+	/* Same VB2 metadata contract as dst_buf_done(), with saved picture PTS. */
+	vb2_set_plane_payload(&vb->vb2_buf, 0, size);
+	vb2_set_plane_payload(&vb->vb2_buf, 1, size / 2);
+	vb->vb2_buf.timestamp = pic->timestamp;
+	vb->timecode = pic->timecode;
+	vb->flags = pic->flags;
+	vb->field = pic->field;
+	vb->sequence = sess->sequence_cap++;
+	pic->pending = false;
+	pic->displayed = true;
+	m->pending--;
+	if (pic->packet_done)
+		atomic_dec(&sess->esparser_queued_bufs);
+	v4l2_m2m_buf_done(vb, VB2_BUF_STATE_DONE);
+	schedule_work(&sess->esparser_queue_work);
+	return 0;
+}
+
+static int mpeg12_multi_dimensions(struct amvdec_session *sess)
+{
+	struct mpeg12_multi *m = sess->priv;
+	u32 width = amvdec_read_dos(sess->core, MREG_PIC_WIDTH);
+	u32 height = amvdec_read_dos(sess->core, MREG_PIC_HEIGHT);
+	const struct v4l2_event ev = {
+		.type = V4L2_EVENT_SOURCE_CHANGE,
+		.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION,
+	};
+
+	if (!width || !height || width > sess->fmt_out->max_width ||
+	    height > sess->fmt_out->max_height ||
+	    width > sess->capture_width || height > sess->capture_height)
+		return -EINVAL;
+	m->width = width;
+	m->height = height;
+	if (width != sess->width || height != sess->height) {
+		sess->width = width;
+		sess->height = height;
+		sess->visible_width = width;
+		sess->visible_height = height;
+		v4l2_event_queue_fh(&sess->fh, &ev);
+	}
+	return 0;
+}
+
+static int mpeg12_multi_run(struct amvdec_session *sess)
+{
+	struct mpeg12_multi *m = sess->priv;
+	struct amvdec_core *core = sess->core;
+	u32 rp, size, fifo = 0;
+	unsigned int i;
+	int ret, index = -1;
+
+	if (m->error)
+		return m->error;
+	if (!m->ready || m->running || m->terminal ||
+	    (!m->swap_valid && !m->committed) ||
+	    (m->empty && m->job_end == m->committed))
+		return 0;
+	for (i = 0; i < MPEG12_MULTI_BUFFERS; i++) {
+		if (i != m->refs[0] && i != m->refs[1] &&
+		    !m->picture[i].pending && !m->picture[i].displayed) {
+			index = i;
+			break;
+		}
+	}
+	if (index < 0)
+		return 0;
+	/* vmpeg12_multi.run(): retain IMEM, quiescing DMA/DMC before reset. */
+	ret = amvdec_vdec1_reset(sess, 0xfffffff0);
+	if (ret)
+		return ret;
+	amvdec_write_dos_bits(core, POWER_CTL_VLD, BIT(4));
+	if (m->swap_valid) {
+		ret = mpeg12_multi_swap(sess, false);
+		if (ret)
+			return ret;
+		/* Snapshot the restored reservoir BEFORE CONTROL/WP can refill it. */
+		fifo = amvdec_read_dos(core, VLD_MEM_VIFIFO_LEVEL);
+	} else {
+		amvdec_write_dos(core, VLD_MEM_VIFIFO_START_PTR, sess->vififo_paddr);
+		amvdec_write_dos(core, VLD_MEM_VIFIFO_END_PTR,
+				 sess->vififo_paddr + sess->vififo_size - 8);
+		amvdec_write_dos(core, VLD_MEM_VIFIFO_CURR_PTR, sess->vififo_paddr);
+		amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL, 1);
+		amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL, 0);
+		amvdec_write_dos(core, VLD_MEM_VIFIFO_BUF_CNTL, MEM_BUFCTRL_MANUAL);
+		amvdec_write_dos(core, VLD_MEM_VIFIFO_RP, sess->vififo_paddr);
+	}
+	rp = amvdec_read_dos(core, VLD_MEM_VIFIFO_RP);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_WP,
+			 sess->vififo_paddr + sess->stream_write);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL,
+			 (0x11 << 16) | BIT(10) | (7 << 3));
+	/* rp and fifo describe the same pre-refill restored checkpoint. */
+	if (rp < sess->vififo_paddr ||
+	    rp >= sess->vififo_paddr + sess->vififo_size)
+		return -EIO;
+	size = (sess->stream_write + sess->vififo_size -
+		(rp - sess->vififo_paddr)) % sess->vififo_size;
+	size += fifo;
+	if (!size)
+		return 0;
+	/* MULTI workspace base contains LMEM/CC/matrix/MV partitions; unlike
+	 * SINGLE, CO_MV_START must NOT have the 5KiB workspace offset added.
+	 */
+	amvdec_write_dos(core, MREG_CO_MV_START, m->workspace_dma);
+	amvdec_write_dos(core, AV_SCRATCH_0, m->cc_dma);
+	amvdec_write_dos(core, AV_SCRATCH_2,
+			 m->refs[0] < 0 ? U32_MAX : m->canvas[m->refs[0]]);
+	amvdec_write_dos(core, AV_SCRATCH_3,
+			 m->refs[1] < 0 ? U32_MAX : m->canvas[m->refs[1]]);
+	amvdec_write_dos(core, MPEG12_MULTI_REC_CANVAS, m->canvas[index]);
+	amvdec_write_dos(core, MPEG12_MULTI_ANC2_CANVAS, m->canvas[index]);
+	/* The vendor restores these saved registers even without valid MPEG
+	 * context; zero-initialized values prevent another codec's leftovers.
+	 */
+	for (i = 0; i < ARRAY_SIZE(mpeg12_context_regs); i++)
+		amvdec_write_dos(core, mpeg12_context_regs[i], m->context[i]);
+	amvdec_write_dos(core, MPEG1_2_REG,
+			 m->context_valid ? m->context[3] : 0);
+	amvdec_write_dos(core, PIC_HEAD_INFO,
+			 m->context_valid ? m->context[4] : 0x380);
+	amvdec_write_dos(core, PSCALE_CTRL, 0);
+	amvdec_write_dos(core, M4_CONTROL_REG, 0);
+	amvdec_write_dos(core, MREG_BUFFEROUT, 0);
+	amvdec_write_dos(core, MREG_CMD, (m->width << 16) | m->height);
+	amvdec_write_dos(core, MREG_PIC_WIDTH, m->width);
+	amvdec_write_dos(core, MREG_PIC_HEIGHT, m->height);
+	amvdec_write_dos(core, MREG_ERROR_COUNT, 0);
+	/* bit1: parameter notify; bit0: separate CMA userdata buffer. */
+	amvdec_write_dos(core, MREG_FATAL_ERROR, 3);
+	amvdec_write_dos(core, MREG_WAIT_BUFFER, 0);
+	amvdec_write_dos(core, AV_SCRATCH_G, 0);
+	amvdec_write_dos(core, AV_SCRATCH_J,
+			 m->context_valid ? 0 : m->userdata_wp);
+	amvdec_write_dos(core, MREG_BUFFERIN, m->context_valid ? BIT(6) : 0);
+	amvdec_write_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(17));
+	amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(16));
+	amvdec_write_dos(core, ASSIST_MBOX1_CLR_REG, 1);
+	amvdec_write_dos(core, ASSIST_MBOX1_MASK, 1);
+	m->active = index;
+	m->job_end = m->committed;
+	m->empty = false;
+	dma_wmb();
+	amvdec_write_dos_bits(core, VLD_MEM_VIFIFO_CONTROL,
+			      MEM_CTRL_EMPTY_EN | MEM_CTRL_FILL_EN);
+	m->running = true;
+	sess->processor_started = true;
+	amvdec_write_dos(core, MPSR, 1);
+	return 0;
+}
+
+static int mpeg12_multi_picture_done(struct amvdec_session *sess, u32 status)
+{
+	struct mpeg12_multi *m = sess->priv;
+	struct amvdec_core *core = sess->core;
+	struct mpeg12_multi_picture *pic;
+	u32 info = amvdec_read_dos(core, MREG_PIC_INFO);
+	u32 seq = amvdec_read_dos(core, MREG_SEQ_INFO);
+	u32 offset = amvdec_read_dos(core, MREG_FRAME_OFFSET);
+	u32 rec = amvdec_read_dos(core, MPEG12_MULTI_REC_CANVAS);
+	u32 type = info & MPEG12_MULTI_PIC_TYPE;
+	unsigned int i;
+	int index = m->active, display = index, ret;
+
+	if (index < 0 || index >= MPEG12_MULTI_BUFFERS ||
+	    rec != m->canvas[index] || info & MPEG12_MULTI_PIC_ERROR ||
+	    type == MPEG12_MULTI_PIC_TYPE ||
+	    amvdec_read_dos(core, MREG_ERROR_COUNT))
+		return -EIO;
+	if ((seq & MPEG12_MULTI_SEQ_EXT) && (seq & MPEG12_MULTI_SEQ_PROG) &&
+	    !(info & PICINFO_PROG))
+		return -EPROTO;
+	if ((!m->decoded && type) ||
+	    (type == MPEG12_MULTI_TYPE_B && m->refs[0] < 0))
+		return -EPROTO;
+	ret = mpeg12_multi_dimensions(sess);
+	if (ret)
+		return ret;
+	pic = &m->picture[index];
+	ret = mpeg12_multi_timestamp(sess, pic, offset);
+	if (ret)
+		return ret;
+	pic->offset = offset;
+	pic->field = V4L2_FIELD_NONE;
+	/* MPEG-1 has no sequence/picture coding extension: its absent
+	 * progressive_frame bit does not describe an interlaced picture.
+	 */
+	if ((seq & MPEG12_MULTI_SEQ_EXT) &&
+	    (!(info & PICINFO_PROG) || !(seq & MPEG12_MULTI_SEQ_PROG)))
+		pic->field = info & PICINFO_TOP_FIRST ? V4L2_FIELD_INTERLACED_TB :
+						      V4L2_FIELD_INTERLACED_BT;
+	sess->field = pic->field;
+	pic->flags &= ~(V4L2_BUF_FLAG_KEYFRAME | V4L2_BUF_FLAG_PFRAME |
+			V4L2_BUF_FLAG_BFRAME);
+	pic->flags |= !type ? V4L2_BUF_FLAG_KEYFRAME :
+		      type == MPEG12_MULTI_TYPE_P ? V4L2_BUF_FLAG_PFRAME :
+						   V4L2_BUF_FLAG_BFRAME;
+	pic->pending = true;
+	m->pending++;
+	m->decoded++;
+	/* update_reference(): the first I is shown immediately, the second
+	 * reference is delayed, later references release the preceding one.
+	 * Display ownership remains independent of these TWO reference holds.
+	 */
+	if (type != MPEG12_MULTI_TYPE_B) {
+		if (m->refs[1] < 0) {
+			m->refs[1] = index;
+		} else if (m->refs[0] < 0) {
+			m->refs[0] = m->refs[1];
+			m->refs[1] = index;
+			display = -1;
+		} else {
+			m->refs[0] = m->refs[1];
+			m->refs[1] = index;
+			display = m->refs[0];
+		}
+	}
+	/* SEQ_END invalidates the MPEG context, but still reports its actual
+	 * completed picture. It is not a license to emit a stale final surface.
+	 */
+	m->context_valid = status != MPEG12_MULTI_SEQ_END;
+	if (m->context_valid)
+		for (i = 0; i < ARRAY_SIZE(mpeg12_context_regs); i++)
+			m->context[i] = amvdec_read_dos(core, mpeg12_context_regs[i]);
+	ret = mpeg12_multi_swap(sess, true);
+	if (ret)
+		return ret;
+	codec_mpeg12_update_dar(sess);
+	if (display >= 0) {
+		ret = mpeg12_multi_present(sess, display);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+static irqreturn_t mpeg12_multi_threaded_isr(struct amvdec_session *sess)
+{
+	struct mpeg12_multi *m = sess->priv;
+	struct amvdec_core *core = sess->core;
+	u32 status, value, rp, remaining;
+	int ret = 0;
+
+	mutex_lock(&m->lock);
+	amvdec_write_dos(core, ASSIST_MBOX1_CLR_REG, 1);
+	if (m->error || !m->running)
+		goto unlock;
+	if (amvdec_read_dos(core, MREG_FATAL_ERROR) == 1) {
+		ret = -EIO;
+		goto fail;
+	}
+	value = amvdec_read_dos(core, AV_SCRATCH_G);
+	if (value == 1) {
+		ret = mpeg12_multi_dimensions(sess);
+		if (ret)
+			goto fail;
+		amvdec_write_dos(core, AV_SCRATCH_G, 0);
+		goto unlock;
+	}
+	value = amvdec_read_dos(core, AV_SCRATCH_J);
+	if (value & BIT(16)) {
+		if ((value & 0x7fff) >= MPEG12_MULTI_CC_SIZE) {
+			ret = -EOVERFLOW;
+			goto fail;
+		}
+		m->userdata_wp = value & ~BIT(16);
+		amvdec_write_dos(core, AV_SCRATCH_J, 0);
+		goto unlock;
+	}
+	status = amvdec_read_dos(core, MREG_BUFFEROUT);
+	/* The vendor stream-input path leaves DATA_REQUEST to VLD refill.
+	 * Only frame-input mode has a host chunk/VIFF_BIT_CNT continuation.
+	 */
+	if (!status || status == MPEG12_MULTI_DATA_REQUEST)
+		goto unlock;
+	if (status != MPEG12_MULTI_PIC_DONE &&
+	    status != MPEG12_MULTI_SEQ_END && status != MPEG12_MULTI_DATA_EMPTY) {
+		ret = -EPROTO;
+		goto fail;
+	}
+	ret = mpeg12_multi_pause(sess);
+	if (ret)
+		goto fail;
+	if (status == MPEG12_MULTI_DATA_EMPTY) {
+		m->empty = true;
+		/* Do not checkpoint an incomplete picture. New input replays the
+		 * previous completed-picture MPEG/VLD checkpoint, not this state.
+		 */
+	} else {
+		ret = mpeg12_multi_picture_done(sess, status);
+		if (ret)
+			goto fail;
+	}
+	/* SEQ_END or empty are firmware events, never elapsed-time EOF.
+	 * Both must have reached the real B7 marker in the latest input run.
+	 * An incomplete picture retains its unmatched timestamp and cannot end.
+	 */
+	if ((status == MPEG12_MULTI_SEQ_END || status == MPEG12_MULTI_DATA_EMPTY) &&
+	    m->eos_queued && m->job_end == m->committed &&
+	    m->committed == m->eos_start + sizeof(eos_sequence) &&
+	    mpeg12_multi_timestamps_empty(sess)) {
+		rp = amvdec_read_dos(core, VLD_MEM_VIFIFO_RP);
+		if (rp < sess->vififo_paddr ||
+		    rp >= sess->vififo_paddr + sess->vififo_size) {
+			ret = -EIO;
+			goto fail;
+		}
+		remaining = (sess->stream_write + sess->vififo_size -
+			     (rp - sess->vififo_paddr)) % sess->vififo_size;
+		if (remaining <= sizeof(eos_sequence) - 4)
+			m->terminal = true;
+	}
+	ret = mpeg12_multi_run(sess);
+	if (ret)
+		goto fail;
+	goto unlock;
+fail:
+	m->error = ret;
+	if (m->running)
+		mpeg12_multi_pause(sess);
+	dev_err(core->dev, "MPEG12 MULTI failed: %d output=%08x offset=%08x\n",
+		ret, amvdec_read_dos(core, MREG_BUFFEROUT),
+		amvdec_read_dos(core, MREG_FRAME_OFFSET));
+unlock:
+	mutex_unlock(&m->lock);
+	if (ret)
+		amvdec_abort(sess);
+	schedule_work(&sess->esparser_queue_work);
+	return IRQ_HANDLED;
+}
+
+static int mpeg12_multi_start(struct amvdec_session *sess)
+{
+	struct mpeg12_multi *m;
+	struct device *dev = sess->core->dev;
+
+	if (sess->core->platform->revision != VDEC_REVISION_SC2 ||
+	    sess->pixfmt_cap != V4L2_PIX_FMT_NV12M)
+		return -EINVAL;
+	m = kzalloc(sizeof(*m), GFP_KERNEL);
+	if (!m)
+		return -ENOMEM;
+	mutex_init(&m->lock);
+	m->refs[0] = -1;
+	m->refs[1] = -1;
+	m->active = -1;
+	m->workspace = dma_alloc_coherent(dev, MPEG12_MULTI_WORKSPACE,
+					  &m->workspace_dma, GFP_KERNEL);
+	if (!m->workspace)
+		goto free_context;
+	m->cc = dma_alloc_coherent(dev, MPEG12_MULTI_CC_SIZE,
+				   &m->cc_dma, GFP_KERNEL);
+	if (!m->cc)
+		goto free_workspace;
+	m->swap = dma_alloc_coherent(dev, PAGE_SIZE, &m->swap_dma, GFP_KERNEL);
+	if (!m->swap)
+		goto free_cc;
+	sess->priv = m;
+	sess->keyframe_found = 1;
+	amvdec_src_change(sess, sess->width, sess->height, MPEG12_MULTI_BUFFERS);
+	return 0;
+free_cc:
+	dma_free_coherent(dev, MPEG12_MULTI_CC_SIZE, m->cc, m->cc_dma);
+free_workspace:
+	dma_free_coherent(dev, MPEG12_MULTI_WORKSPACE, m->workspace,
+			  m->workspace_dma);
+free_context:
+	kfree(m);
+	return -ENOMEM;
+}
+
+static int mpeg12_multi_stop(struct amvdec_session *sess)
+{
+	struct mpeg12_multi *m = sess->priv;
+	struct device *dev = sess->core->dev;
+
+	/* vdec_1_sc2_stop has disabled IRQs and proved processor/DMC DMA idle. */
+	dma_free_coherent(dev, PAGE_SIZE, m->swap, m->swap_dma);
+	dma_free_coherent(dev, MPEG12_MULTI_CC_SIZE, m->cc, m->cc_dma);
+	dma_free_coherent(dev, MPEG12_MULTI_WORKSPACE, m->workspace,
+			  m->workspace_dma);
+	return 0;
+}
+
+static void mpeg12_multi_resume(struct amvdec_session *sess)
+{
+	struct mpeg12_multi *m = sess->priv;
+	unsigned int i;
+	int ret = 0;
+
+	mutex_lock(&m->lock);
+	if (!m->ready) {
+		if (sess->num_dst_bufs != MPEG12_MULTI_BUFFERS ||
+		    sess->pixfmt_cap != V4L2_PIX_FMT_NV12M) {
+			ret = -EINVAL;
+			goto unlock;
+		}
+		ret = amvdec_set_canvases(sess,
+			(u32[]){ ANC0_CANVAS_ADDR, 0 },
+			(u32[]){ MPEG12_MULTI_BUFFERS, 0 });
+		if (ret)
+			goto unlock;
+		/* Save immutable owned canvas identities BEFORE ANC2 becomes REC. */
+		for (i = 0; i < MPEG12_MULTI_BUFFERS; i++)
+			m->canvas[i] = amvdec_read_dos(sess->core,
+						     ANC0_CANVAS_ADDR + 4 * i);
+		m->ready = true;
+	}
+	ret = mpeg12_multi_run(sess);
+unlock:
+	if (ret)
+		m->error = ret;
+	mutex_unlock(&m->lock);
+	if (ret)
+		amvdec_abort(sess);
+}
+
+static void mpeg12_multi_input_committed(struct amvdec_session *sess,
+					u32 offset, u32 bytes)
+{
+	struct mpeg12_multi *m = sess->priv;
+	int ret;
+
+	mutex_lock(&m->lock);
+	m->committed = offset + bytes;
+	ret = mpeg12_multi_run(sess);
+	if (ret)
+		m->error = ret;
+	mutex_unlock(&m->lock);
+	if (ret)
+		amvdec_abort(sess);
+}
+
+static u32 mpeg12_multi_input_read_pointer(struct amvdec_session *sess)
+{
+	struct mpeg12_multi *m = sess->priv;
+
+	/* Keep bytes needed by the last completed-picture replay checkpoint. */
+	return sess->vififo_paddr + READ_ONCE(m->retained);
+}
+
+static int mpeg12_multi_can_recycle(struct amvdec_core *core)
+{
+	return 1;
+}
+
+static void mpeg12_multi_recycle(struct amvdec_core *core, u32 index)
+{
+	struct amvdec_session *sess = core->cur_sess;
+	struct mpeg12_multi *m = sess->priv;
+	int ret;
+
+	mutex_lock(&m->lock);
+	if (index >= MPEG12_MULTI_BUFFERS) {
+		ret = -EINVAL;
+	} else {
+		m->picture[index].displayed = false;
+		ret = mpeg12_multi_run(sess);
+	}
+	if (ret)
+		m->error = ret;
+	mutex_unlock(&m->lock);
+	if (ret)
+		amvdec_abort(sess);
+}
+
+static int mpeg12_multi_drain_step(struct amvdec_session *sess)
+{
+	struct mpeg12_multi *m = sess->priv;
+	int ret = 0, index;
+
+	mutex_lock(&m->lock);
+	if (m->error) {
+		ret = m->error;
+		goto unlock;
+	}
+	if (!m->eos_queued) {
+		m->eos_start = sess->stream_offset;
+		ret = esparser_queue_eos(sess->core, eos_sequence,
+					 sizeof(eos_sequence));
+		if (ret == -EAGAIN) {
+			ret = 0;
+			goto unlock;
+		}
+		if (ret < 0)
+			goto unlock;
+		m->committed = sess->stream_offset;
+		m->eos_queued = true;
+	}
+	ret = mpeg12_multi_run(sess);
+	if (ret || !m->terminal || m->running)
+		goto unlock;
+	if (!mpeg12_multi_timestamps_empty(sess)) {
+		ret = -EPROTO;
+		goto unlock;
+	}
+	/* flush_output(): refs[1] is the delayed final IP, not an ANC index.
+	 * The initial single I was already presented and must not be repeated.
+	 */
+	index = m->refs[1];
+	if (index >= 0 && m->picture[index].pending) {
+		ret = mpeg12_multi_present(sess, index);
+		if (ret)
+			goto unlock;
+	}
+	m->refs[0] = -1;
+	m->refs[1] = -1;
+	if (m->pending || atomic_read(&sess->esparser_queued_bufs)) {
+		ret = -EPROTO;
+		goto unlock;
+	}
+	amvdec_eos(sess);
+	ret = 1;
+unlock:
+	if (ret < 0)
+		m->error = ret;
+	mutex_unlock(&m->lock);
+	return ret;
+}
+
+struct amvdec_codec_ops codec_mpeg12_multi_ops = {
+	.manages_processor = true,
+	.start = mpeg12_multi_start,
+	.stop = mpeg12_multi_stop,
+	.isr = codec_mpeg12_isr,
+	.threaded_isr = mpeg12_multi_threaded_isr,
+	.can_recycle = mpeg12_multi_can_recycle,
+	.recycle = mpeg12_multi_recycle,
+	.resume = mpeg12_multi_resume,
+	.input_committed = mpeg12_multi_input_committed,
+	.input_read_pointer = mpeg12_multi_input_read_pointer,
+	.drain_step = mpeg12_multi_drain_step,
 };

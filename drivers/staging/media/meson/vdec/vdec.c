@@ -368,6 +368,7 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 		if (sess->aborted)
 			goto resume_failed;
 		if (core->platform->revision == VDEC_REVISION_SC2 &&
+		    !codec_ops->manages_processor &&
 		    sess->fmt_out->needs_capture && !sess->processor_started) {
 			amvdec_write_dos(core, MPSR, 1);
 			sess->processor_started = true;
@@ -415,7 +416,8 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 			codec_ops->resume(sess);
 			if (sess->aborted)
 				goto resume_failed;
-			if (core->platform->revision == VDEC_REVISION_SC2) {
+			if (core->platform->revision == VDEC_REVISION_SC2 &&
+			    !codec_ops->manages_processor) {
 				amvdec_write_dos(core, MPSR, 1);
 				sess->processor_started = true;
 			}
@@ -841,7 +843,7 @@ static void vdec_sc2_eos_work(struct work_struct *work)
 						 struct amvdec_session, drain_work);
 	struct amvdec_codec_ops *codec = sess->fmt_out->codec_ops;
 	const u8 *sequence;
-	u32 length;
+	u32 length, end, read, remaining;
 	int ret;
 
 	if (!READ_ONCE(sess->draining))
@@ -865,6 +867,18 @@ static void vdec_sc2_eos_work(struct work_struct *work)
 		schedule_work(&sess->esparser_queue_work);
 		goto unlock_retry;
 	}
+	if (codec->drain_step) {
+		sess->should_stop = 1;
+		WRITE_ONCE(sess->eos_queued, true);
+		ret = codec->drain_step(sess);
+		if (ret) {
+			if (ret < 0)
+				amvdec_abort(sess);
+			sess->draining = false;
+			goto unlock;
+		}
+		goto unlock_retry;
+	}
 	if (!sess->eos_queued) {
 		if (!codec->eos_sequence) {
 			amvdec_abort(sess);
@@ -872,9 +886,18 @@ static void vdec_sc2_eos_work(struct work_struct *work)
 			goto unlock;
 		}
 		sequence = codec->eos_sequence(&length);
+		end = length;
+		while (end && !sequence[end - 1])
+			end--;
+		sess->drain_padding = length - end;
 		sess->should_stop = 1;
 		WRITE_ONCE(sess->eos_queued, true);
 		ret = esparser_queue_eos(sess->core, sequence, length);
+		dev_dbg(sess->core->dev,
+			"EOS queue ret=%d len=%u state=%u src=%u pending=%d\n",
+			ret, length, sess->status,
+			v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx),
+			atomic_read(&sess->esparser_queued_bufs));
 		if (ret == -EAGAIN) {
 			WRITE_ONCE(sess->eos_queued, false);
 			goto unlock_retry;
@@ -885,25 +908,39 @@ static void vdec_sc2_eos_work(struct work_struct *work)
 			goto unlock;
 		}
 	}
-	/* H264 acknowledges the SPS-switch sentinel explicitly. Legacy single
-	 * protocols consume sequence-end and become quiet. This presentation
-	 * drain never substitutes for the DMC/DMA idle proof at STREAMOFF.
+	/* A manual VIFIFO retains a partial fetch burst of zero padding, so its
+	 * level need not reach zero. Require the read pointer to have crossed
+	 * every coded byte and the sequence-end marker, every tracked input
+	 * presentation to be returned, and the output mailbox to be acknowledged.
+	 * This does not replace the separate DMC/DMA idle proof at STREAMOFF.
+	 * H264 uses its explicit frame-status EOS acknowledgement instead.
 	 */
+	read = amvdec_read_dos(sess->core, VLD_MEM_VIFIFO_RP);
 	if (sess->fmt_out->pixfmt != V4L2_PIX_FMT_H264 &&
-	    !amvdec_read_dos(sess->core, VLD_MEM_VIFIFO_LEVEL) &&
-	    !amvdec_read_dos(sess->core, AV_SCRATCH_9) &&
-	    time_is_before_jiffies64(sess->last_irq_jiffies + msecs_to_jiffies(50))) {
-		if (!sess->drain_empty_since)
-			sess->drain_empty_since = jiffies;
-		if (time_after_eq(jiffies, sess->drain_empty_since + msecs_to_jiffies(250))) {
+	    read >= sess->vififo_paddr &&
+	    read < sess->vififo_paddr + sess->vififo_size) {
+		remaining = (sess->stream_write + sess->vififo_size -
+			     (read - sess->vififo_paddr)) % sess->vififo_size;
+		if (remaining <= sess->drain_padding &&
+		    !atomic_read(&sess->esparser_queued_bufs) &&
+		    !amvdec_read_dos(sess->core, AV_SCRATCH_9)) {
 			amvdec_eos(sess);
 			sess->draining = false;
 			goto unlock;
 		}
-	} else {
-		sess->drain_empty_since = 0;
 	}
 unlock_retry:
+	if (sess->eos_queued)
+		dev_dbg(sess->core->dev,
+			"EOS wait done=%u state=%u pending=%d scratch=%08x/%08x/%08x fifo=%08x/%08x/%08x\n",
+			sess->eos_completed, sess->status,
+			atomic_read(&sess->esparser_queued_bufs),
+			amvdec_read_dos(sess->core, AV_SCRATCH_0),
+			amvdec_read_dos(sess->core, AV_SCRATCH_1),
+			amvdec_read_dos(sess->core, AV_SCRATCH_A),
+			amvdec_read_dos(sess->core, VLD_MEM_VIFIFO_RP),
+			amvdec_read_dos(sess->core, VLD_MEM_VIFIFO_WP),
+			amvdec_read_dos(sess->core, VLD_MEM_VIFIFO_LEVEL));
 	mutex_unlock(&sess->lock);
 retry:
 	if (READ_ONCE(sess->draining))
@@ -1012,7 +1049,7 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 			return 0;
 		sess->draining = true;
 		sess->eos_queued = false;
-		sess->drain_empty_since = 0;
+		sess->drain_padding = 0;
 		sess->drain_deadline = jiffies + msecs_to_jiffies(5000);
 		schedule_delayed_work(&sess->drain_work, 0);
 		return 0;

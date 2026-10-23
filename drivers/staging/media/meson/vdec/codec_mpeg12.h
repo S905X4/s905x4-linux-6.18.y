@@ -10,5 +10,6 @@
 #include "vdec.h"
 
 extern struct amvdec_codec_ops codec_mpeg12_ops;
+extern struct amvdec_codec_ops codec_mpeg12_multi_ops;
 
 #endif

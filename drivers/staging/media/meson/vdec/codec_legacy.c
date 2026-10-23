@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * SC2 VDEC1 single-instance MPEG4, VC1, AVS and MJPEG protocols.
+ * SC2 VDEC1 VC1, factory AVSM and MJPEG protocols.
  *
  * Register transactions and workspace relocations adapted from Amlogic's
- * vmpeg4.c, vvc1.c, avs.c and vmjpeg.c (Copyright 2017 Amlogic, Inc.),
+ * vvc1.c, avs_multi.c and vmjpeg.c (Copyright 2017 Amlogic, Inc.),
  * also present in CoreELEC media_modules-aml a387dea216e416f975377152d374557d448093c8.
- * Firmware owns reconstruction, references and display reordering. This is
- * deliberately not the similarly named multi-instance firmware protocol.
+ * AVSM uses MULTI run/checkpoint commands but the factory image publishes the
+ * avs.c display/geometry ABI. Its BUFFEROUT, not the run slot, owns output.
  */
 #include <linux/bitops.h>
 #include <linux/dma-mapping.h>
+#include <linux/iopoll.h>
+#include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/soc/amlogic/meson-canvas.h>
 #include <media/v4l2-event.h>
@@ -21,6 +23,7 @@
 #include "codec_legacy.h"
 #include "dos_regs.h"
 #include "vdec_helpers.h"
+#include "vdec_1.h"
 
 #define LEGACY_WIDTH 1920
 #define LEGACY_HEIGHT 1088
@@ -31,13 +34,62 @@
 #define LEGACY_CANVAS_ACCESS 0x0014
 #define LEGACY_SCRATCH_M 0x2758
 #define LEGACY_SCRATCH_N 0x275c
+#define LEGACY_AVS_WORKSPACE_SIZE SZ_4M
+#define LEGACY_AVS_USERDATA_SIZE SZ_8K
+#define LEGACY_AVS_WORKSPACE_BASE 0x01a00000
+#define LEGACY_AVS_DECODE_STATUS_INFO 5
+#define AVSM_LMEM_SIZE (0x500 * 2)
+#define AVSM_LMEM_OFFSET ALIGN(LEGACY_AVS_WORKSPACE_SIZE + LEGACY_AVS_USERDATA_SIZE, PAGE_SIZE)
+#define AVSM_DMA_SIZE ALIGN(AVSM_LMEM_OFFSET + AVSM_LMEM_SIZE, PAGE_SIZE)
+#define AVSM_REG(word) ((word) * 4)
+#define AVSM_BIT_COUNT AVSM_REG(0xc1a)
+#define AVSM_CONTROL AVSM_REG(0xc1e)
+#define AVSM_REC_CANVAS AVSM_REG(0x9b2)
+#define AVSM_CANVAS_DATAL AVSM_REG(0x9ea)
+#define AVSM_CANVAS_DATAH AVSM_REG(0x9eb)
+#define AVSM_CANVAS_ADDR AVSM_REG(0x9ec)
+#define AVSM_CANVAS_CFG0 AVSM_REG(0x9ed)
 
-enum legacy_codec { LEGACY_MPEG4, LEGACY_VC1, LEGACY_AVS, LEGACY_MJPEG };
+/* avs_multi.c vavs_save_regs/vavs_restore_regs, vendor word addresses.
+ * Scratch4/B are per-run commands, not saved context. I is private LMEM DMA.
+ */
+static const u16 avsm_context_regs[] = {
+	AVSM_REG(0x9c0), AVSM_REG(0x9c1), AVSM_REG(0x9c2), AVSM_REG(0x9c3),
+	AVSM_REG(0x9c5), AVSM_REG(0x9c6), AVSM_REG(0x9c7), AVSM_REG(0x9c8),
+	AVSM_REG(0x9c9), AVSM_REG(0x9ca), AVSM_REG(0x9cc), AVSM_REG(0x9cd),
+	AVSM_REG(0x9ce), AVSM_REG(0x9cf), AVSM_REG(0x9d0), AVSM_REG(0x9d1),
+	AVSM_REG(0x9d2), AVSM_REG(0xc09), AVSM_REG(0xc1a),
+	AVSM_REG(0x9b2), AVSM_REG(0x9b0), AVSM_REG(0x9b1),
+	AVSM_REG(0x992), AVSM_REG(0x990), AVSM_REG(0x991),
+	AVSM_REG(0x993), AVSM_REG(0x994), AVSM_REG(0x995),
+	AVSM_REG(0xc04), AVSM_REG(0xc1e), AVSM_REG(0xc38),
+	AVSM_REG(0xc0c), AVSM_REG(0xc0d), AVSM_REG(0xe00),
+	AVSM_REG(0xe0e), AVSM_REG(0xe0c), AVSM_REG(0xc0a),
+	AVSM_REG(0xe04), AVSM_REG(0xe19), AVSM_REG(0xe1a),
+	AVSM_REG(0xe1b), AVSM_REG(0xc39), AVSM_REG(0x952),
+	AVSM_REG(0x908), AVSM_REG(0xc3d), AVSM_REG(0xc18),
+};
+
+struct avsm_picture {
+	u32 offset;
+	u32 info;
+	u32 width;
+	u32 height;
+	struct v4l2_fract aspect;
+	/* Completion authority is PIC_DONE/REC or an actual BUFFEROUT. */
+	bool valid;
+	bool displayed;
+	bool consumer;
+};
+
+enum legacy_codec { LEGACY_VC1 = 1, LEGACY_AVS, LEGACY_MJPEG };
 
 struct codec_legacy {
 	enum legacy_codec codec;
 	struct amvdec_session *sess;
 	struct delayed_work recycle_work;
+	/* Serialize BUFFEROUT publication/acknowledgement with BUFFERIN writes. */
+	struct mutex output_lock;
 	unsigned long pending_recycle;
 	void *workspace;
 	dma_addr_t workspace_dma;
@@ -46,16 +98,45 @@ struct codec_legacy {
 	u32 canvases[8];
 	u32 error_count;
 	bool configured;
+	u32 mjpeg_width;
+	u32 mjpeg_height;
+	bool mjpeg_fields;
 	u8 wmv_sequence[4];
-	u8 mpeg4_time_bits;
 	bool wmv_sequence_valid;
 	bool failed;
 	bool source_wait;
 	bool metadata_ready;
+	bool mjpeg_input_dumped;
+	u32 avsm_regs[ARRAY_SIZE(avsm_context_regs)];
+	struct avsm_picture avsm_pics[8];
+	u8 avsm_display[8];
+	u8 avsm_display_head;
+	u8 avsm_display_count;
+	u16 avsm_decode_count;
+	u32 avsm_recycled;
+	u32 avsm_run_recycled;
+	u32 avsm_busy;
+	u32 avsm_committed;
+	u32 avsm_run_end;
+	u32 avsm_empty_at;
+	u32 avsm_frame_offset;
+	u32 avsm_frame_bytes;
+	u32 avsm_frame_pictures;
+	u32 avsm_frame_info;
+	bool avsm_input_pending;
+	bool avsm_running;
+	bool avsm_context_valid;
+	bool avsm_empty;
+	bool avsm_low_delay;
+	bool avsm_plus;
+	bool avsm_modern_header;
 };
 
 static void legacy_abort(struct amvdec_session *sess);
 static irqreturn_t legacy_threaded_isr(struct amvdec_session *sess);
+static irqreturn_t legacy_process_output(struct amvdec_session *sess);
+static void avsm_service(struct amvdec_session *sess);
+static irqreturn_t avsm_process_output(struct amvdec_session *sess);
 
 static bool legacy_old_frames_drained(struct amvdec_session *sess)
 {
@@ -69,6 +150,32 @@ static bool legacy_old_frames_drained(struct amvdec_session *sess)
 	return empty;
 }
 
+static void legacy_debug_state(struct amvdec_session *sess, const char *reason)
+{
+	struct codec_legacy *ctx = sess->priv;
+	struct amvdec_core *core = sess->core;
+	unsigned int i;
+
+	dev_dbg(core->dev,
+		"legacy %s codec=%u configured=%u started=%u queued=%d stream=%#x displayed=%u recycle=%#lx\n",
+		reason, ctx->codec, ctx->configured, sess->processor_started,
+		atomic_read(&sess->esparser_queued_bufs), sess->stream_offset,
+		sess->sequence_cap, READ_ONCE(ctx->pending_recycle));
+	dev_dbg(core->dev,
+		"legacy state mpsr=%#x fifo control=%#x current=%#x wp=%#x rp=%#x level=%#x pic_dc=%#x canvas_mode=%#x\n",
+		amvdec_read_dos(core, MPSR),
+		amvdec_read_dos(core, VLD_MEM_VIFIFO_CONTROL),
+		amvdec_read_dos(core, VLD_MEM_VIFIFO_CURR_PTR),
+		amvdec_read_dos(core, VLD_MEM_VIFIFO_WP),
+		amvdec_read_dos(core, VLD_MEM_VIFIFO_RP),
+		amvdec_read_dos(core, VLD_MEM_VIFIFO_LEVEL),
+		amvdec_read_dos(core, MDEC_PIC_DC_CTRL),
+		amvdec_read_dos(core, LEGACY_CANVAS_ACCESS));
+	for (i = 0; i < 24; i++)
+		dev_dbg(core->dev, "legacy scratch[%u]=%#x\n", i,
+			amvdec_read_dos(core, AV_SCRATCH_0 + 4 * i));
+}
+
 static void legacy_recycle_worker(struct work_struct *work)
 {
 	struct codec_legacy *ctx = container_of(to_delayed_work(work),
@@ -77,18 +184,28 @@ static void legacy_recycle_worker(struct work_struct *work)
 	unsigned long pending;
 	u32 idx;
 
+	mutex_lock(&ctx->output_lock);
 	if (READ_ONCE(ctx->failed))
-		return;
-	if ((ctx->codec == LEGACY_MPEG4 && amvdec_read_dos(core, AV_SCRATCH_L)) ||
-	    ((ctx->codec == LEGACY_VC1 || ctx->codec == LEGACY_AVS) &&
-	     amvdec_read_dos(core, AV_SCRATCH_7))) {
+		goto unlock;
+	if (ctx->codec == LEGACY_AVS) {
+		avsm_service(ctx->sess);
+		goto unlock;
+	}
+	if (ctx->codec == LEGACY_MJPEG && !ctx->mjpeg_input_dumped &&
+	    READ_ONCE(ctx->sess->stream_offset)) {
+		ctx->mjpeg_input_dumped = true;
+		legacy_debug_state(ctx->sess, "first input");
+	}
+	if (ctx->codec == LEGACY_VC1 && amvdec_read_dos(core, AV_SCRATCH_7)) {
 		legacy_abort(ctx->sess);
-		return;
+		goto unlock;
 	}
 	if (READ_ONCE(ctx->source_wait) && legacy_old_frames_drained(ctx->sess)) {
 		WRITE_ONCE(ctx->source_wait, false);
-		legacy_threaded_isr(ctx->sess);
+		legacy_process_output(ctx->sess);
 	}
+	if (READ_ONCE(ctx->failed))
+		goto unlock;
 	pending = READ_ONCE(ctx->pending_recycle);
 	if (pending && !amvdec_read_dos(core, LEGACY_BUFFERIN)) {
 		idx = __ffs(pending);
@@ -96,12 +213,14 @@ static void legacy_recycle_worker(struct work_struct *work)
 		amvdec_write_dos(core, LEGACY_BUFFERIN,
 			ctx->codec == LEGACY_MJPEG ? idx + 1 : ~(u32)BIT(idx));
 	}
+unlock:
+	mutex_unlock(&ctx->output_lock);
 	if (!READ_ONCE(ctx->failed))
 		schedule_delayed_work(&ctx->recycle_work,
 			msecs_to_jiffies(READ_ONCE(ctx->pending_recycle) ? 1 : 10));
 }
 
-/* AVS derives buffers 4..7 by adding eight to the first four canvas IDs. */
+/* JPEG adds twelve to the first bank's canvas IDs. */
 static int legacy_canvas_range(struct amvdec_session *sess, unsigned int count)
 {
 	u8 allocated[256], first = 0;
@@ -132,46 +251,6 @@ static int legacy_canvas_range(struct amvdec_session *sess, unsigned int count)
 	return -ENOSPC;
 }
 
-/* The JPEG ABI programs first-field canvases through scratch4..7, but only
- * fixed absolute second-field IDs are evidenced by the vendor host. Reserve
- * those IDs independently; DRM legitimately owns low canvas IDs at probe.
- */
-static int mjpeg_canvas_reserve(struct amvdec_session *sess)
-{
-	u8 allocated[256], primary[8], id;
-	unsigned int n = 0, first = 0, i;
-	u32 secondary = 0;
-	int ret;
-
-	while (n < ARRAY_SIZE(allocated)) {
-		ret = meson_canvas_alloc(sess->core->canvas, &id);
-		if (ret)
-			break;
-		allocated[n++] = id;
-		if (id >= 12 && id <= 25)
-			secondary |= BIT(id - 12);
-		else if (first < ARRAY_SIZE(primary))
-			primary[first++] = id;
-		if (secondary == GENMASK(13, 0) && first == ARRAY_SIZE(primary))
-			break;
-	}
-	if (secondary != GENMASK(13, 0) || first != ARRAY_SIZE(primary)) {
-		for (i = 0; i < n; i++)
-			meson_canvas_free(sess->core->canvas, allocated[i]);
-		return -EBUSY;
-	}
-	for (i = 0; i < n; i++) {
-		id = allocated[i];
-		if ((id < 12 || id > 25) && !memchr(primary, id, sizeof(primary)))
-			meson_canvas_free(sess->core->canvas, id);
-	}
-	for (i = 0; i < ARRAY_SIZE(primary); i++)
-		sess->canvas_alloc[sess->canvas_num++] = primary[i];
-	for (i = 12; i <= 25; i++)
-		sess->canvas_alloc[sess->canvas_num++] = i;
-	return 0;
-}
-
 static int legacy_canvas_config(struct amvdec_session *sess, u8 id,
 				dma_addr_t dma, u32 stride, u32 height)
 {
@@ -181,11 +260,10 @@ static int legacy_canvas_config(struct amvdec_session *sess, u8 id,
 		return -ERANGE;
 	ret = meson_canvas_config(sess->core->canvas, id, dma, stride,
 				  height, MESON_CANVAS_WRAP_NONE,
-				  MESON_CANVAS_BLKMODE_LINEAR,
-				  MESON_CANVAS_ENDIAN_SWAP64);
+				  MESON_CANVAS_BLKMODE_LINEAR, MESON_CANVAS_ENDIAN_SWAP64);
 	if (ret)
 		return ret;
-	/* G12A+ VDEC-local canvas block-mode override, linear mode. */
+	/* The VDEC-local canvas mode must follow the global DMC canvas entry. */
 	amvdec_write_dos(sess->core, LEGACY_CANVAS_ACCESS,
 			 BIT(11) | BIT(8) | id);
 	return 0;
@@ -193,20 +271,22 @@ static int legacy_canvas_config(struct amvdec_session *sess, u8 id,
 
 static int legacy_set_canvases(struct amvdec_session *sess)
 {
-	static const u8 mjpeg_second[] = { 12, 14, 22, 24 };
 	struct codec_legacy *ctx = sess->priv;
 	struct v4l2_m2m_buffer *buf;
-	u32 count = ctx->buffers * 2;
-	u32 i = 0, start = sess->canvas_num, y, uv;
-	dma_addr_t y_dma, uv_dma;
+	bool planar = ctx->codec == LEGACY_MJPEG;
+	u32 planes = planar ? 3 : 2, count = ctx->buffers * planes;
+	u32 i = 0, start = sess->canvas_num, p;
 	int ret;
 
-	if (sess->pixfmt_cap != V4L2_PIX_FMT_NV12M ||
+	if ((planar ? sess->pixfmt_cap != V4L2_PIX_FMT_YUV420M :
+		      sess->pixfmt_cap != V4L2_PIX_FMT_NV12M) ||
 	    sess->fmt_out->capture_width != LEGACY_WIDTH ||
 	    sess->fmt_out->capture_height != LEGACY_HEIGHT)
 		return -EINVAL;
-	ret = ctx->codec == LEGACY_MJPEG ? mjpeg_canvas_reserve(sess) :
-		legacy_canvas_range(sess, count);
+	/* SC2 JPEG adds twelve to each primary canvas component for field two,
+	 * as observed in PSCALE_CANVAS_WR_ADDR. Own both banks after relocation.
+	 */
+	ret = legacy_canvas_range(sess, planar ? count * 2 : count);
 	if (ret)
 		return ret;
 
@@ -215,37 +295,33 @@ static int legacy_set_canvases(struct amvdec_session *sess)
 			ret = -EINVAL;
 			goto fail;
 		}
-		y = sess->canvas_alloc[start + i * 2];
-		uv = sess->canvas_alloc[start + i * 2 + 1];
-		y_dma = vb2_dma_contig_plane_dma_addr(&buf->vb.vb2_buf, 0);
-		uv_dma = vb2_dma_contig_plane_dma_addr(&buf->vb.vb2_buf, 1);
-		if (vb2_plane_size(&buf->vb.vb2_buf, 0) < LEGACY_WIDTH * LEGACY_HEIGHT ||
-		    vb2_plane_size(&buf->vb.vb2_buf, 1) < LEGACY_WIDTH * LEGACY_HEIGHT / 2) {
-			ret = -EINVAL;
-			goto fail;
-		}
-		ret = legacy_canvas_config(sess, y, y_dma, LEGACY_WIDTH, LEGACY_HEIGHT);
-		if (ret)
-			goto fail;
-		ret = legacy_canvas_config(sess, uv, uv_dma, LEGACY_WIDTH, LEGACY_HEIGHT / 2);
-		if (ret)
-			goto fail;
-		ctx->canvases[i] = y | uv << 8 | uv << 16;
-		if (ctx->codec == LEGACY_MJPEG) {
-			u32 field_height = DIV_ROUND_UP(sess->height, 2);
-			u8 second = mjpeg_second[i];
+		ctx->canvases[i] = 0;
+		for (p = 0; p < planes; p++) {
+			dma_addr_t dma = vb2_dma_contig_plane_dma_addr(&buf->vb.vb2_buf, p);
+			u32 stride = LEGACY_WIDTH >> (planar && p);
+			u32 height = LEGACY_HEIGHT >> !!p;
+			u8 id = sess->canvas_alloc[start + i * planes + p];
 
-			ret = legacy_canvas_config(sess, second,
-					 y_dma + LEGACY_WIDTH * field_height,
-					 LEGACY_WIDTH, LEGACY_HEIGHT / 2);
+			if (vb2_plane_size(&buf->vb.vb2_buf, p) < stride * height) {
+				ret = -EINVAL;
+				goto fail;
+			}
+			ret = legacy_canvas_config(sess, id, dma, stride, height);
 			if (ret)
 				goto fail;
-			ret = legacy_canvas_config(sess, second + 1,
-					 uv_dma + LEGACY_WIDTH * field_height / 2,
-					 LEGACY_WIDTH, LEGACY_HEIGHT / 4);
-			if (ret)
-				goto fail;
+			ctx->canvases[i] |= id << (8 * p);
+			if (ctx->codec == LEGACY_MJPEG) {
+				u32 field_height = DIV_ROUND_UP(sess->height, 2) >> !!p;
+				u8 second = id + 12;
+
+				ret = legacy_canvas_config(sess, second,
+						 dma + stride * field_height, stride, height / 2);
+				if (ret)
+					goto fail;
+			}
 		}
+		if (!planar)
+			ctx->canvases[i] |= (ctx->canvases[i] & 0xff00) << 8;
 		sess->fw_idx_to_vb2_idx[i++] = buf->vb.vb2_buf.index;
 	}
 	if (i == ctx->buffers)
@@ -322,30 +398,24 @@ static int legacy_configure(struct amvdec_session *sess)
 	amvdec_write_dos(core, POWER_CTL_VLD, BIT(4));
 	amvdec_clear_dos_bits(core, VLD_MEM_VIFIFO_CONTROL, GENMASK(23, 16));
 	amvdec_write_dos_bits(core, VLD_MEM_VIFIFO_CONTROL, 2 << 16 | 8 << 18);
-	for (i = 0; i < min(ctx->buffers, 4U); i++)
-		amvdec_write_dos(core, (ctx->codec == LEGACY_MJPEG ?
-				 AV_SCRATCH_4 : AV_SCRATCH_0) + 4 * i,
-				 ctx->canvases[i]);
+	if (ctx->codec != LEGACY_AVS)
+		for (i = 0; i < min(ctx->buffers, 4U); i++)
+			amvdec_write_dos(core, (ctx->codec == LEGACY_MJPEG ?
+					 AV_SCRATCH_4 : AV_SCRATCH_0) + 4 * i,
+					 ctx->canvases[i]);
 	amvdec_write_dos(core, PSCALE_CTRL, 0);
 	amvdec_write_dos(core, LEGACY_BUFFERIN, 0);
 	amvdec_write_dos(core, LEGACY_BUFFEROUT, 0);
 	/* Bit17 selects interleaved chroma; bit16=0 selects UV, not VU. */
-	amvdec_write_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(17));
+	if (sess->pixfmt_cap == V4L2_PIX_FMT_YUV420M)
+		amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(17));
+	else
+		amvdec_write_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(17));
 	amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(16));
 
+
+
 	switch (ctx->codec) {
-	case LEGACY_MPEG4:
-		for (i = 4; i < 8; i++)
-			amvdec_write_dos(core, AV_SCRATCH_G + 4 * (i - 4),
-					 ctx->canvases[i]);
-		amvdec_write_dos(core, AV_SCRATCH_L, 0);
-		amvdec_write_dos(core, LEGACY_WORKSPACE,
-				 lower_32_bits(ctx->workspace_dma) - 0x02b00000);
-		amvdec_write_dos(core, AV_SCRATCH_A, 0);
-		amvdec_write_dos(core, AV_SCRATCH_7, sess->width << 16 | sess->height);
-		amvdec_write_dos(core, AV_SCRATCH_E, 0);
-		amvdec_write_dos(core, MDEC_PIC_DC_THRESH, 0x404038aa);
-		break;
 	case LEGACY_VC1:
 		amvdec_write_dos(core, LEGACY_WORKSPACE,
 				 lower_32_bits(ctx->workspace_dma) - 0x01f00000);
@@ -354,15 +424,33 @@ static int legacy_configure(struct amvdec_session *sess)
 				 sess->fmt_out->pixfmt == V4L2_PIX_FMT_VC1_ANNEX_G);
 		break;
 	case LEGACY_AVS:
-		amvdec_write_dos(core, LEGACY_WORKSPACE,
-				 lower_32_bits(ctx->workspace_dma) - 0x01a00000);
-		amvdec_write_dos(core, AV_SCRATCH_H, 1);
-		amvdec_write_dos(core, AV_SCRATCH_G, 0);
+		/* The four dynamic-table words occupy SCRATCH0..3. These register
+		 * constants are byte addresses; i is a surface index, not a register
+		 * offset. */
+		for (i = 0; i < ctx->buffers; i += 2)
+			amvdec_write_dos(core, AV_SCRATCH_0 + 4 * (i >> 1),
+				(ctx->canvases[i] & 0xffff) |
+				(ctx->canvases[i + 1] & 0xffff) << 16);
+
 		amvdec_write_dos(core, AV_SCRATCH_7, 0);
 		amvdec_write_dos(core, AV_SCRATCH_D, 0);
-		/* No userdata DMA is requested; decoding does not depend on it. */
+		amvdec_write_dos(core, AV_SCRATCH_E, 0);
 		amvdec_write_dos(core, LEGACY_SCRATCH_M, 0);
-		amvdec_write_dos(core, LEGACY_SCRATCH_N, 0);
+		amvdec_write_dos(core, LEGACY_WORKSPACE,
+				 lower_32_bits(ctx->workspace_dma) -
+				 LEGACY_AVS_WORKSPACE_BASE);
+		/* Factory AVSM stream mode; run commands follow committed input. */
+		amvdec_write_dos(core, AV_SCRATCH_6, 2);
+		amvdec_write_dos(core, AV_SCRATCH_H, 0);
+		amvdec_write_dos(core, AV_SCRATCH_I,
+			lower_32_bits(ctx->workspace_dma + AVSM_LMEM_OFFSET));
+		amvdec_write_dos(core, AV_SCRATCH_J, 0);
+		amvdec_write_dos(core, AV_SCRATCH_G, 1);
+		/* The image requires its own 8 KiB userdata DMA ring. Like vendor
+		 * AV_SCRATCH_N = userdata_dma - buf_offset, this is relative to F.
+		 */
+		amvdec_write_dos(core, LEGACY_SCRATCH_N,
+				 LEGACY_AVS_WORKSPACE_BASE + LEGACY_AVS_WORKSPACE_SIZE);
 		break;
 	case LEGACY_MJPEG:
 		amvdec_write_dos(core, AV_SCRATCH_0, 12);
@@ -376,6 +464,7 @@ static int legacy_configure(struct amvdec_session *sess)
 	amvdec_write_dos(core, ASSIST_MBOX1_CLR_REG, 1);
 	amvdec_write_dos(core, ASSIST_MBOX1_MASK, 1);
 	ctx->configured = true;
+	legacy_debug_state(sess, "configured");
 	schedule_delayed_work(&ctx->recycle_work, msecs_to_jiffies(10));
 	return 0;
 }
@@ -390,9 +479,11 @@ static int legacy_start(struct amvdec_session *sess, enum legacy_codec codec)
 		return -ENOMEM;
 	ctx->codec = codec;
 	ctx->sess = sess;
+	mutex_init(&ctx->output_lock);
 	INIT_DELAYED_WORK(&ctx->recycle_work, legacy_recycle_worker);
-	ctx->buffers = codec == LEGACY_MPEG4 || codec == LEGACY_AVS ? 8 : 4;
-	ctx->workspace_size = codec == LEGACY_AVS ? SZ_4M :
+	ctx->buffers = codec == LEGACY_AVS ? 8 : 4;
+	ctx->workspace_size = codec == LEGACY_AVS ?
+			      AVSM_DMA_SIZE :
 			      codec == LEGACY_VC1 ? SZ_2M : SZ_1M;
 	if (codec != LEGACY_MJPEG) {
 		ctx->workspace = dma_alloc_coherent(sess->core->dev,
@@ -427,15 +518,20 @@ free:
 	return ret;
 }
 
-static int mpeg4_start(struct amvdec_session *s) { return legacy_start(s, LEGACY_MPEG4); }
 static int vc1_start(struct amvdec_session *s) { return legacy_start(s, LEGACY_VC1); }
-static int avs_start(struct amvdec_session *s) { return legacy_start(s, LEGACY_AVS); }
+static int avs_start(struct amvdec_session *s)
+{
+	if (s->fmt_out->firmware_index != MESON_AVS_FIRMWARE_INDEX)
+		return -EINVAL;
+	return legacy_start(s, LEGACY_AVS);
+}
 static int mjpeg_start(struct amvdec_session *s) { return legacy_start(s, LEGACY_MJPEG); }
 
 static int legacy_stop(struct amvdec_session *sess)
 {
 	struct codec_legacy *ctx = sess->priv;
 
+	legacy_debug_state(sess, "stopping");
 	WRITE_ONCE(ctx->failed, true);
 	cancel_delayed_work_sync(&ctx->recycle_work);
 	/* Engine stop has already drained VDEC's DMC channel before freeing DMA. */
@@ -478,6 +574,7 @@ static void legacy_abort(struct amvdec_session *sess)
 {
 	struct codec_legacy *ctx = sess->priv;
 
+	legacy_debug_state(sess, "aborting");
 	WRITE_ONCE(ctx->failed, true);
 	amvdec_write_dos(sess->core, ASSIST_MBOX1_MASK, 0);
 	amvdec_write_dos(sess->core, MPSR, 0);
@@ -641,127 +738,15 @@ static int vc1_prepare_input(struct amvdec_session *sess,
 	return 0;
 }
 
-struct legacy_bits {
-	const u8 *data;
-	u32 size;
-	u32 pos;
-	bool error;
-};
-
-static u32 legacy_get_bits(struct legacy_bits *bits, unsigned int count)
-{
-	u32 value = 0;
-
-	if (count > 32 || count > bits->size - bits->pos) {
-		bits->error = true;
-		return 0;
-	}
-	while (count--) {
-		value = value << 1 | (bits->data[bits->pos / 8] >>
-					(7 - bits->pos % 8) & 1);
-		bits->pos++;
-	}
-	return value;
-}
-
-static void legacy_skip_bits(struct legacy_bits *bits, unsigned int count)
-{
-	if (count > bits->size - bits->pos)
-		bits->error = true;
-	else
-		bits->pos += count;
-}
-
-static int mpeg4_vol_time_bits(struct legacy_bits *bits)
-{
-	u32 version = 1, shape, resolution;
-
-	legacy_skip_bits(bits, 9); /* random_accessible_vol, object type */
-	if (legacy_get_bits(bits, 1)) {
-		version = legacy_get_bits(bits, 4);
-		legacy_skip_bits(bits, 3);
-	}
-	if (legacy_get_bits(bits, 4) == 15)
-		legacy_skip_bits(bits, 16); /* extended pixel aspect */
-	if (legacy_get_bits(bits, 1)) {
-		legacy_skip_bits(bits, 3); /* chroma_format, low_delay */
-		if (legacy_get_bits(bits, 1))
-			legacy_skip_bits(bits, 79); /* vbv_parameters */
-	}
-	shape = legacy_get_bits(bits, 2);
-	if (shape == 3 && version != 1)
-		legacy_skip_bits(bits, 4);
-	if (legacy_get_bits(bits, 1) != 1)
-		return -EINVAL;
-	resolution = legacy_get_bits(bits, 16);
-	if (bits->error || !resolution || legacy_get_bits(bits, 1) != 1)
-		return -EINVAL;
-	return max(1, fls(resolution - 1));
-}
-
-/* Count coded VOPs, not start codes: packed Xvid can contain several pictures
- * and an uncoded dummy VOP. All actual pictures retain the OUTPUT's token.
- * Timing syntax follows ISO/IEC 14496-2 VOL/VOP headers; decoding stays in HW.
- */
-static int mpeg4_prepare_input(struct amvdec_session *sess,
-			      struct vb2_v4l2_buffer *vbuf, u32 *payload_size)
-{
-	struct codec_legacy *ctx = sess->priv;
-	const u8 *data = vb2_plane_vaddr(&vbuf->vb2_buf, 0);
-	u32 size = *payload_size, i, pictures = 0;
-	int time_bits = ctx->mpeg4_time_bits;
-
-	if (!data)
-		return -EINVAL;
-	for (i = 0; i + 4 <= size; i++) {
-		struct legacy_bits bits;
-		u8 code;
-
-		if (data[i] || data[i + 1] || data[i + 2] != 1)
-			continue;
-		code = data[i + 3];
-		bits = (struct legacy_bits) {
-			.data = data + i + 4, .size = (size - i - 4) * 8,
-		};
-		if ((code & 0xf0) == 0x20) {
-			time_bits = mpeg4_vol_time_bits(&bits);
-			if (time_bits < 0)
-				return time_bits;
-		} else if (code == 0xb6) {
-			if (!time_bits)
-				return -EINVAL; /* no valid VOL has established timing */
-			legacy_skip_bits(&bits, 2); /* vop_coding_type */
-			while (legacy_get_bits(&bits, 1))
-				; /* modulo_time_base */
-			if (legacy_get_bits(&bits, 1) != 1)
-				return -EINVAL;
-			legacy_skip_bits(&bits, time_bits);
-			if (legacy_get_bits(&bits, 1) != 1)
-				return -EINVAL;
-			pictures += legacy_get_bits(&bits, 1); /* vop_coded */
-			if (bits.error)
-				return -EINVAL;
-		}
-		i += 3;
-	}
-	ctx->mpeg4_time_bits = time_bits;
-	sess->input_frames = pictures;
-	return 0;
-}
-
 static int mjpeg_prepare_input(struct amvdec_session *sess,
 			       struct vb2_v4l2_buffer *vbuf, u32 *payload_size)
 {
-	static const u8 second_offset[] = { 12, 14, 22, 24 };
 	struct codec_legacy *ctx = sess->priv;
 	const u8 *data = vb2_plane_vaddr(&vbuf->vb2_buf, 0);
 	u32 size = *payload_size, pos = 2, width = 0, height = 0, i;
 	bool fields = false;
 
-	/* Single MJPEG has no references: serialize compressed pictures so that
-	 * a source change can update the field canvas split without racing DMA.
-	 */
-	if (!ctx->configured || atomic_read(&sess->esparser_queued_bufs))
+	if (!ctx->configured)
 		return -EAGAIN;
 	if (!data || size < 4 || data[0] != 0xff || data[1] != 0xd8)
 		return -EINVAL;
@@ -803,6 +788,15 @@ static int mjpeg_prepare_input(struct amvdec_session *sess,
 	}
 	if (!width || !height || width > LEGACY_WIDTH || height > LEGACY_HEIGHT)
 		return -EINVAL;
+	/* The single-instance firmware consumes a stream, not one submitted
+	 * picture at a time. Keep its lookahead supplied while the canvas layout
+	 * is unchanged; only a real layout change needs outstanding DMA drained.
+	 */
+	if (width == ctx->mjpeg_width && height == ctx->mjpeg_height &&
+	    fields == ctx->mjpeg_fields)
+		return 0;
+	if (atomic_read(&sess->esparser_queued_bufs))
+		return -EAGAIN;
 	if ((width != sess->width || height != sess->height) &&
 	    !legacy_old_frames_drained(sess))
 		return -EAGAIN;
@@ -810,8 +804,7 @@ static int mjpeg_prepare_input(struct amvdec_session *sess,
 	for (i = 0; i < ctx->buffers; i++) {
 		struct vb2_buffer *vb = vb2_get_buffer(v4l2_m2m_get_dst_vq(sess->m2m_ctx),
 						 sess->fw_idx_to_vb2_idx[i]);
-		u32 stride = LEGACY_WIDTH << fields;
-		u8 second = second_offset[i];
+		u32 p;
 		int ret;
 
 		if (!vb)
@@ -819,28 +812,28 @@ static int mjpeg_prepare_input(struct amvdec_session *sess,
 		/* Aliasing the two field canvases onto alternate rows performs the
 		 * weave in the decoder's DMA engine, not through a CPU pixel copy.
 		 */
-		ret = legacy_canvas_config(sess, ctx->canvases[i] & 0xff,
-			vb2_dma_contig_plane_dma_addr(vb, 0), stride,
-			LEGACY_HEIGHT >> fields);
-		if (ret)
-			return ret;
-		ret = legacy_canvas_config(sess, (ctx->canvases[i] >> 8) & 0xff,
-			vb2_dma_contig_plane_dma_addr(vb, 1), stride,
-			(LEGACY_HEIGHT / 2) >> fields);
-		if (ret)
-			return ret;
-		ret = legacy_canvas_config(sess, second,
-			vb2_dma_contig_plane_dma_addr(vb, 0) + LEGACY_WIDTH,
-			stride, LEGACY_HEIGHT / 2);
-		if (ret)
-			return ret;
-		ret = legacy_canvas_config(sess, second + 1,
-			vb2_dma_contig_plane_dma_addr(vb, 1) + LEGACY_WIDTH,
-			stride, LEGACY_HEIGHT / 4);
-		if (ret)
-			return ret;
+		for (p = 0; p < 3; p++) {
+			u32 pitch = LEGACY_WIDTH >> !!p;
+			u32 stride = pitch << fields;
+			u32 canvas_height = LEGACY_HEIGHT >> !!p;
+			u8 primary = (ctx->canvases[i] >> (8 * p)) & 0xff;
+			u8 second = primary + 12;
+			dma_addr_t dma = vb2_dma_contig_plane_dma_addr(vb, p);
+
+			ret = legacy_canvas_config(sess, primary, dma, stride,
+						 canvas_height >> fields);
+			if (ret)
+				return ret;
+			ret = legacy_canvas_config(sess, second, dma + pitch,
+						 stride, canvas_height / 2);
+			if (ret)
+				return ret;
+		}
 	}
 	amvdec_write_dos(sess->core, AV_SCRATCH_2, height << 4 | 0x8000);
+	ctx->mjpeg_width = width;
+	ctx->mjpeg_height = height;
+	ctx->mjpeg_fields = fields;
 	return 0;
 }
 
@@ -900,9 +893,685 @@ static void legacy_complete(struct amvdec_session *sess, u32 idx, u32 offset,
 	if (damaged)
 		buf->flags |= V4L2_BUF_FLAG_ERROR;
 	vb2_set_plane_payload(&buf->vb2_buf, 0, LEGACY_WIDTH * LEGACY_HEIGHT);
-	vb2_set_plane_payload(&buf->vb2_buf, 1, LEGACY_WIDTH * LEGACY_HEIGHT / 2);
+	if (sess->pixfmt_cap == V4L2_PIX_FMT_YUV420M) {
+		vb2_set_plane_payload(&buf->vb2_buf, 1, LEGACY_WIDTH * LEGACY_HEIGHT / 4);
+		vb2_set_plane_payload(&buf->vb2_buf, 2, LEGACY_WIDTH * LEGACY_HEIGHT / 4);
+	} else {
+		vb2_set_plane_payload(&buf->vb2_buf, 1, LEGACY_WIDTH * LEGACY_HEIGHT / 2);
+	}
 	v4l2_m2m_buf_done(buf, VB2_BUF_STATE_DONE);
 	schedule_work(&sess->esparser_queue_work);
+}
+
+static void avsm_abort(struct amvdec_session *sess, const char *reason, u32 index)
+{
+	struct codec_legacy *ctx = sess->priv;
+	struct amvdec_core *core = sess->core;
+	u32 valid = 0, displayed = 0, consumer = 0, i;
+
+	for (i = 0; i < ctx->buffers; i++) {
+		valid |= ctx->avsm_pics[i].valid ? BIT(i) : 0;
+		displayed |= ctx->avsm_pics[i].displayed ? BIT(i) : 0;
+		consumer |= ctx->avsm_pics[i].consumer ? BIT(i) : 0;
+	}
+	dev_err(core->dev,
+		"AVSM failure=%s slot=%u h=%#x bo=%#x rec=%#x scratch4=%#x g=%#x offset=%#x wh=%#x/%#x running=%u count=%u busy=%#x valid=%#x displayed=%#x consumer=%#x recycle=%#x sent=%#x\n",
+		reason, index, amvdec_read_dos(core, AV_SCRATCH_H),
+		amvdec_read_dos(core, LEGACY_BUFFEROUT),
+		amvdec_read_dos(core, AVSM_REC_CANVAS),
+		amvdec_read_dos(core, AV_SCRATCH_4),
+		amvdec_read_dos(core, AV_SCRATCH_G),
+		amvdec_read_dos(core, LEGACY_OFFSET),
+		amvdec_read_dos(core, AV_SCRATCH_1),
+		amvdec_read_dos(core, AV_SCRATCH_2), ctx->avsm_running,
+		ctx->avsm_decode_count, ctx->avsm_busy, valid, displayed,
+		consumer, ctx->avsm_recycled, ctx->avsm_run_recycled);
+	dev_err(core->dev,
+		"AVSM input committed=%#x run_end=%#x context=%u rp=%#x wp=%#x level=%#x bits=%#x queued=%d display_queue=%u\n",
+		ctx->avsm_committed, ctx->avsm_run_end, ctx->avsm_context_valid,
+		amvdec_read_dos(core, VLD_MEM_VIFIFO_RP),
+		amvdec_read_dos(core, VLD_MEM_VIFIFO_WP),
+		amvdec_read_dos(core, VLD_MEM_VIFIFO_LEVEL),
+		amvdec_read_dos(core, AVSM_BIT_COUNT),
+		atomic_read(&sess->esparser_queued_bufs), ctx->avsm_display_count);
+	legacy_abort(sess);
+}
+
+
+static void avsm_reset_processor(struct amvdec_core *core)
+{
+	/* amvdec_start/amvdec_stop require these bus reads around CPU reset. */
+	amvdec_read_dos(core, DOS_SW_RESET0);
+	amvdec_read_dos(core, DOS_SW_RESET0);
+	amvdec_read_dos(core, DOS_SW_RESET0);
+	amvdec_write_dos(core, DOS_SW_RESET0, BIT(12) | BIT(11));
+	amvdec_write_dos(core, DOS_SW_RESET0, 0);
+	amvdec_read_dos(core, DOS_SW_RESET0);
+	amvdec_read_dos(core, DOS_SW_RESET0);
+	amvdec_read_dos(core, DOS_SW_RESET0);
+}
+
+static int avsm_stop_processor(struct amvdec_session *sess)
+{
+	struct codec_legacy *ctx = sess->priv;
+	struct amvdec_core *core = sess->core;
+	u32 value;
+	int ret;
+
+	amvdec_write_dos(core, MPSR, 0);
+	amvdec_write_dos(core, CPSR, 0);
+	ctx->avsm_running = false;
+	WRITE_ONCE(sess->processor_started, false);
+	ret = readl_poll_timeout(core->dos_base + IMEM_DMA_CTRL, value,
+				 !(value & BIT(15)), 10, 100000);
+	if (!ret)
+		ret = readl_poll_timeout(core->dos_base + LMEM_DMA_CTRL, value,
+					 !(value & BIT(15)), 10, 100000);
+	if (!ret)
+		avsm_reset_processor(core);
+	return ret;
+}
+
+static void avsm_queue_display(struct codec_legacy *ctx, unsigned int index)
+{
+	unsigned int tail;
+
+	if (index >= ctx->buffers || !ctx->avsm_pics[index].valid ||
+	    ctx->avsm_pics[index].displayed || ctx->avsm_display_count == 8) {
+		avsm_abort(ctx->sess, "display-queue", index);
+		return;
+	}
+	tail = (ctx->avsm_display_head + ctx->avsm_display_count) & 7;
+	ctx->avsm_display[tail] = index;
+	ctx->avsm_display_count++;
+	ctx->avsm_pics[index].displayed = true;
+	ctx->avsm_pics[index].consumer = true;
+}
+
+static bool avsm_has_timestamp(struct amvdec_session *sess, u32 offset)
+{
+	struct amvdec_timestamp *ts;
+	unsigned long flags;
+	unsigned int matches = 0;
+
+	spin_lock_irqsave(&sess->ts_spinlock, flags);
+	list_for_each_entry(ts, &sess->timestamps, list) {
+		if (ts->remaining && (s32)(offset - ts->offset) >= 0 &&
+		    (s32)(offset - ts->end_offset) < 0)
+			matches++;
+	}
+	spin_unlock_irqrestore(&sess->ts_spinlock, flags);
+	return matches == 1;
+}
+
+static void avsm_publish(struct amvdec_session *sess)
+{
+	struct codec_legacy *ctx = sess->priv;
+
+	while (ctx->avsm_display_count && !ctx->failed) {
+		u32 index = ctx->avsm_display[ctx->avsm_display_head];
+		struct avsm_picture *pic = &ctx->avsm_pics[index];
+		u32 field = V4L2_FIELD_NONE;
+		bool change;
+
+		if (pic->info & BIT(7))
+			field = pic->info & BIT(6) ? V4L2_FIELD_INTERLACED_TB :
+						     V4L2_FIELD_INTERLACED_BT;
+		change = !ctx->metadata_ready || sess->width != pic->width ||
+			sess->height != pic->height || sess->field != field ||
+			sess->pixelaspect.numerator != pic->aspect.numerator ||
+			sess->pixelaspect.denominator != pic->aspect.denominator;
+		if (change && !legacy_old_frames_drained(sess))
+			return;
+		legacy_dimensions(sess, pic->width, pic->height);
+		if (ctx->failed)
+			return;
+		/* Offset belongs to BUFFEROUT's picture, including delayed I/P
+		 * output. Never publish a zero-PTS substitute for a missing token.
+		 */
+		if (!avsm_has_timestamp(sess, pic->offset)) {
+			dev_err(sess->core->dev, "AVSM unmatched display token slot=%u offset=%#x\n",
+				index, pic->offset);
+			avsm_abort(sess, "display-token", index);
+			return;
+		}
+		sess->pixelaspect = pic->aspect;
+		sess->field = field;
+		if (change) {
+			static const struct v4l2_event event = {
+				.type = V4L2_EVENT_SOURCE_CHANGE,
+				.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION,
+			};
+
+			ctx->metadata_ready = true;
+			v4l2_event_queue_fh(&sess->fh, &event);
+		}
+		ctx->avsm_display_head = (ctx->avsm_display_head + 1) & 7;
+		ctx->avsm_display_count--;
+		pic->consumer = true;
+		/* Vendor field views use this same raster; native CAPTURE describes
+		 * both fields in one interlaced buffer, without copying pixels.
+		 */
+		legacy_complete(sess, index, pic->offset, field,
+				(pic->info >> 3) & 7, false);
+	}
+}
+
+static void avsm_start_run(struct amvdec_session *sess, u32 slot)
+{
+	struct codec_legacy *ctx = sess->priv;
+	struct amvdec_core *core = sess->core;
+	u32 i, rp, wp;
+	const char *reason = "run-reset";
+
+	/* A frame job owns one coded access unit and its zero-filled fetch tail. */
+	if (amvdec_vdec1_reset(sess, 0xfffffff0))
+		goto fail;
+	/* vdec_prepare_input resets and powers VLD before restoring its FIFO. */
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL, 0);
+	amvdec_write_dos(core, DOS_SW_RESET0, BIT(3) | BIT(4) | BIT(5));
+	amvdec_write_dos(core, DOS_SW_RESET0, 0);
+	amvdec_write_dos(core, POWER_CTL_VLD, BIT(4));
+	rp = lower_32_bits(sess->vififo_paddr) +
+		ctx->avsm_frame_offset % sess->vififo_size;
+	wp = lower_32_bits(sess->vififo_paddr) +
+		((ctx->avsm_frame_offset % sess->vififo_size +
+		  ctx->avsm_frame_bytes + SZ_1K) & ~7U) % sess->vififo_size;
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_START_PTR,
+		lower_32_bits(sess->vififo_paddr));
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_END_PTR,
+		lower_32_bits(sess->vififo_paddr) + sess->vififo_size - 8);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_CURR_PTR, rp);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL, 1);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL, 0);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_BUF_CNTL, MEM_BUFCTRL_MANUAL);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_RP, rp);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_WP, wp);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_BUF_CNTL, MEM_BUFCTRL_MANUAL | 1);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_BUF_CNTL, MEM_BUFCTRL_MANUAL);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL,
+			 (0x11 << 16) | BIT(10) | (7 << 3));
+	/* vavs_prot_init resets the codec after preparing its input reservoir. */
+	amvdec_write_dos(core, DOS_SW_RESET0, BIT(7) | BIT(6) | BIT(4));
+	amvdec_write_dos(core, DOS_SW_RESET0, 0);
+	amvdec_read_dos(core, DOS_SW_RESET0);
+	amvdec_write_dos(core, DOS_SW_RESET0, BIT(7) | BIT(6) | BIT(4));
+	amvdec_write_dos(core, DOS_SW_RESET0, 0);
+	amvdec_write_dos(core, DOS_SW_RESET0, BIT(9) | BIT(8));
+	amvdec_write_dos(core, DOS_SW_RESET0, 0);
+	amvdec_write_dos(core, POWER_CTL_VLD, BIT(4));
+	amvdec_clear_dos_bits(core, VLD_MEM_VIFIFO_CONTROL, GENMASK(23, 16));
+	amvdec_write_dos_bits(core, VLD_MEM_VIFIFO_CONTROL, 2 << 16 | 8 << 18);
+	if (ctx->avsm_context_valid) {
+		for (i = 0; i < ARRAY_SIZE(avsm_context_regs); i++)
+			amvdec_write_dos(core, avsm_context_regs[i], ctx->avsm_regs[i]);
+	} else {
+		for (i = 0; i < ctx->buffers; i += 2)
+			amvdec_write_dos(core, AV_SCRATCH_0 + 4 * (i >> 1),
+				(ctx->canvases[i] & 0xffff) |
+				(ctx->canvases[i + 1] & 0xffff) << 16);
+		amvdec_write_dos(core, AV_SCRATCH_7, 0);
+		amvdec_write_dos(core, AV_SCRATCH_D, 0);
+		amvdec_write_dos(core, AV_SCRATCH_E, 0);
+		amvdec_write_dos(core, LEGACY_SCRATCH_M, 0);
+		amvdec_write_dos(core, LEGACY_WORKSPACE,
+			lower_32_bits(ctx->workspace_dma) - LEGACY_AVS_WORKSPACE_BASE);
+		amvdec_write_dos(core, LEGACY_BUFFERIN, 0);
+		amvdec_write_dos(core, LEGACY_BUFFEROUT, 0);
+		amvdec_write_dos(core, LEGACY_SCRATCH_N,
+			LEGACY_AVS_WORKSPACE_BASE + LEGACY_AVS_WORKSPACE_SIZE);
+	}
+	/* SC2's full core reset clears its decoder-local LUT. Populate the
+	 * imported surfaces there, as config_cav_lut_ex(VDEC_1) does. The
+	 * global DMC table alone is not the decoder's lookup authority. */
+	amvdec_write_dos(core, AVSM_CANVAS_CFG0, 0);
+	for (i = 0; i < ctx->buffers; i++) {
+		struct vb2_buffer *vb = vb2_get_buffer(
+			v4l2_m2m_get_dst_vq(sess->m2m_ctx), sess->fw_idx_to_vb2_idx[i]);
+		u32 p;
+
+		if (!vb)
+			goto fail;
+		for (p = 0; p < 2; p++) {
+			dma_addr_t dma = vb2_dma_contig_plane_dma_addr(vb, p);
+			u32 width = LEGACY_WIDTH / 8;
+
+			amvdec_write_dos(core, AVSM_CANVAS_DATAL,
+				lower_32_bits(dma >> 3) | ((width & 7) << 29));
+			amvdec_write_dos(core, AVSM_CANVAS_DATAH,
+				(width >> 3) | ((LEGACY_HEIGHT >> p) << 9) |
+				(MESON_CANVAS_ENDIAN_SWAP64 << 26));
+			amvdec_write_dos(core, AVSM_CANVAS_ADDR,
+				(ctx->canvases[i] >> (8 * p)) & 0xff);
+		}
+	}
+	amvdec_write_dos(core, AV_SCRATCH_4, slot);
+	amvdec_write_dos(core, AV_SCRATCH_B, 0);
+	amvdec_write_dos(core, AV_SCRATCH_6, 1);
+	/* vavs_prot_init uses firmware recovery mode 1 on every run. */
+	amvdec_write_dos(core, AV_SCRATCH_G, 1);
+	amvdec_write_dos(core, AV_SCRATCH_I,
+		lower_32_bits(ctx->workspace_dma + AVSM_LMEM_OFFSET));
+	amvdec_write_dos(core, AV_SCRATCH_J, 0);
+	if (ctx->avsm_context_valid)
+		amvdec_write_dos(core, LEGACY_SCRATCH_N, 0);
+	amvdec_write_dos(core, PSCALE_CTRL, 0);
+	amvdec_write_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(17));
+	amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(16) | BIT(31));
+	/* Must precede vdec_enable_input(), also on resumed runs. */
+	amvdec_write_dos(core, AVSM_CONTROL, 0x4c80);
+	amvdec_write_dos_bits(core, VLD_MEM_VIFIFO_CONTROL, BIT(2) | BIT(1));
+	amvdec_write_dos(core, AVSM_BIT_COUNT, ctx->avsm_frame_bytes * 8);
+	ctx->avsm_run_recycled = ctx->avsm_recycled;
+	amvdec_write_dos(core, AV_SCRATCH_H,
+		ctx->avsm_decode_count | ((~ctx->avsm_run_recycled & 0xffff) << 16));
+	ctx->avsm_run_end = ctx->avsm_committed;
+	amvdec_write_dos(core, ASSIST_MBOX1_CLR_REG, 1);
+	amvdec_write_dos(core, ASSIST_MBOX1_MASK, 1);
+	avsm_reset_processor(core);
+	ctx->avsm_running = true;
+	WRITE_ONCE(sess->processor_started, true);
+	amvdec_write_dos(core, MPSR, 1);
+	return;
+fail:
+	avsm_abort(sess, reason, slot);
+}
+
+static void avsm_service(struct amvdec_session *sess)
+{
+	struct codec_legacy *ctx = sess->priv;
+	u32 i;
+
+	if (ctx->failed)
+		return;
+	if (ctx->configured && amvdec_read_dos(sess->core, AV_SCRATCH_7)) {
+		avsm_abort(sess, "service-sos", U32_MAX);
+		return;
+	}
+
+	for (i = 0; i < ctx->buffers; i++) {
+		if (test_and_clear_bit(i, &ctx->pending_recycle)) {
+			ctx->avsm_pics[i].consumer = false;
+			ctx->avsm_recycled |= BIT(i);
+		}
+	}
+	avsm_publish(sess);
+	if (ctx->failed || !ctx->configured || ctx->avsm_running ||
+	    !ctx->avsm_input_pending)
+		return;
+	for (i = 0; i < ctx->buffers; i++) {
+		struct avsm_picture *pic = &ctx->avsm_pics[i];
+
+		if (!(ctx->avsm_busy & ~ctx->avsm_recycled & BIT(i)) &&
+		    !pic->consumer && (!pic->valid || pic->displayed)) {
+			avsm_start_run(sess, i);
+			return;
+		}
+	}
+}
+
+static irqreturn_t avsm_process_output(struct amvdec_session *sess)
+{
+	struct codec_legacy *ctx = sess->priv;
+	struct amvdec_core *core = sess->core;
+	u32 status = amvdec_read_dos(core, AV_SCRATCH_H);
+	u32 result = status & 0xff;
+	u32 reg, index = U32_MAX, type, rec, i;
+	bool terminal = result >= 1 && result <= 4;
+	struct avsm_picture *pic;
+	const char *reason = "irq-sos";
+
+	if (status == LEGACY_AVS_DECODE_STATUS_INFO) {
+		amvdec_write_dos(core, AV_SCRATCH_H, 0);
+		return IRQ_HANDLED;
+	}
+	if (amvdec_read_dos(core, AV_SCRATCH_E) & 0xffff) {
+		amvdec_write_dos(core, AV_SCRATCH_E, 0);
+		return IRQ_HANDLED;
+	}
+	if (amvdec_read_dos(core, LEGACY_SCRATCH_N) & BIT(15)) {
+		amvdec_write_dos(core, LEGACY_SCRATCH_N, 0);
+		return IRQ_HANDLED;
+	}
+	if (amvdec_read_dos(core, AV_SCRATCH_7))
+		goto fail;
+	if (terminal) {
+		reason = "completion-idle";
+		if (!ctx->avsm_running) {
+			/* A stopped run can leave its mailbox status latched until the
+			 * threaded handler acknowledges it. Ignore that stale event. */
+			amvdec_write_dos(core, AV_SCRATCH_H, 0);
+			return IRQ_HANDLED;
+		}
+		reason = "processor-stop";
+		if (avsm_stop_processor(sess))
+			goto fail;
+		/* Prevent the stopped run's terminal status from retriggering the
+		 * mailbox before the next run programs its command word. */
+		amvdec_write_dos(core, AV_SCRATCH_H, 0);
+		/* avs_multi ISR: low byte is the result, next byte is the
+		 * SKIP continuation start code, upper half is a busy bitmap.
+		 * No part of H encodes the displayed picture's slot.
+		 */
+		ctx->avsm_busy = status >> 16;
+		reason = "busy-range";
+		if (ctx->avsm_busy & ~GENMASK(ctx->buffers - 1, 0))
+			goto fail;
+		if (ctx->avsm_frame_pictures && result == 1) {
+			/* Only PIC_DONE proves that REC contains a complete raster.
+			 * EMPTY can also name a partially reconstructed surface.
+			 */
+			rec = amvdec_read_dos(core, AVSM_REC_CANVAS) & 0xffff;
+			for (index = 0; index < ctx->buffers; index++)
+				if ((ctx->canvases[index] & 0xffff) == rec)
+					break;
+			reason = "rec-unowned";
+			if (index == ctx->buffers)
+				goto fail;
+			reason = "rec-not-busy";
+			if (!(ctx->avsm_busy & BIT(index)))
+				goto fail;
+			pic = &ctx->avsm_pics[index];
+			reason = "rec-lifetime";
+			if (pic->consumer || (pic->valid && !pic->displayed))
+				goto fail;
+			*pic = (struct avsm_picture) {
+				.valid = true, .offset = ctx->avsm_frame_offset,
+				.info = ctx->avsm_frame_info,
+				.width = amvdec_read_dos(core, AV_SCRATCH_1),
+				.height = amvdec_read_dos(core, AV_SCRATCH_2),
+			};
+			pic->aspect = legacy_aspect(LEGACY_AVS, pic->width, pic->height,
+				amvdec_read_dos(core, AV_SCRATCH_0));
+		}
+	}
+	reg = amvdec_read_dos(core, LEGACY_BUFFEROUT);
+	if (reg) {
+		/* BUFFEROUT names a displayed surface. Its token was attached to
+		 * that surface when the frame job completed, before later reordering. */
+		index = ((reg & 7) + (((reg >> 8) & 3) << 3) - 1) & 0x1f;
+		type = (reg >> 3) & 7;
+		reason = "display-identity";
+		if (index >= ctx->buffers || type > 2)
+			goto fail;
+		pic = &ctx->avsm_pics[index];
+		reason = "display-lifetime";
+		if (pic->displayed || pic->consumer) {
+			/* A repeated BUFFEROUT for a surface still owned by CAPTURE is
+			 * stale mailbox state, not a second presentation. */
+			amvdec_write_dos(core, LEGACY_BUFFEROUT, 0);
+			goto terminal_complete;
+		}
+		reason = "display-incomplete";
+		if (!pic->valid)
+			goto fail;
+		pic->info = reg;
+		/* avs.c AVS_PIC_WIDTH/HEIGHT, not avs_multi's packed PIC_INFO.
+		 * The live image reports the two words separately.
+		 */
+		pic->width = amvdec_read_dos(core, AV_SCRATCH_1);
+		pic->height = amvdec_read_dos(core, AV_SCRATCH_2);
+		pic->aspect = legacy_aspect(LEGACY_AVS, pic->width, pic->height,
+			amvdec_read_dos(core, AV_SCRATCH_0));
+		dev_dbg(core->dev,
+			"legacy output codec=2 reg=%#x index=%u offset=%#x type=%u repeat=%u errors=0 status=%#x rec=%#x dc_status=%#x anc0=%#x anc1=%#x anc2=%#x\n",
+			reg, index, pic->offset, type,
+			amvdec_read_dos(core, AV_SCRATCH_A), status,
+			amvdec_read_dos(core, AVSM_REC_CANVAS),
+			amvdec_read_dos(core, MDEC_PIC_DC_STATUS),
+			amvdec_read_dos(core, AVSM_REG(0x990)),
+			amvdec_read_dos(core, AVSM_REG(0x991)),
+			amvdec_read_dos(core, AVSM_REG(0x992)));
+		avsm_queue_display(ctx, index);
+		if (ctx->failed)
+			return IRQ_HANDLED;
+		amvdec_write_dos(core, LEGACY_BUFFEROUT, 0);
+	}
+terminal_complete:
+	if (terminal && ctx->avsm_frame_pictures && (result == 2 || result == 3)) {
+		reason = "incomplete-picture";
+		goto fail;
+	}
+	if (!terminal) {
+		avsm_publish(sess);
+		return IRQ_HANDLED;
+	}
+	if (++ctx->avsm_decode_count == 0)
+		ctx->avsm_decode_count++;
+	for (i = 0; i < ARRAY_SIZE(avsm_context_regs); i++)
+		ctx->avsm_regs[i] = amvdec_read_dos(core, avsm_context_regs[i]);
+	ctx->avsm_recycled &= ~ctx->avsm_run_recycled;
+	ctx->avsm_context_valid = true;
+	ctx->avsm_empty = true;
+	ctx->avsm_empty_at = ctx->avsm_run_end;
+	ctx->avsm_input_pending = false;
+	schedule_work(&sess->esparser_queue_work);
+	avsm_service(sess);
+	return IRQ_HANDLED;
+fail:
+	avsm_abort(sess, reason, index);
+	return IRQ_HANDLED;
+}
+
+/* The pending reference has no BUFFEROUT yet. Preserve its coded header
+ * metadata, rather than borrowing flags from a different displayed picture.
+ */
+static u32 avsm_read_bits(const u8 *data, u32 bytes, u32 *pos, u32 count)
+{
+	u32 value = 0;
+
+	if (count > 32 || *pos > bytes * 8 || count > bytes * 8 - *pos) {
+		*pos = U32_MAX;
+		return 0;
+	}
+	while (count) {
+		u32 bits = min(8 - (*pos & 7), count);
+
+		value = (value << bits) |
+			((data[*pos >> 3] >> (8 - (*pos & 7) - bits)) &
+			 ((1U << bits) - 1));
+		*pos += bits;
+		count -= bits;
+	}
+	return value;
+}
+
+static int avsm_picture_info(struct codec_legacy *ctx, const u8 *data,
+			     u32 bytes, u32 *info)
+{
+	u32 i;
+
+	for (i = 0; i + 4 <= bytes; i++) {
+		const u8 *header;
+		u32 size, pos, peek, type, progressive, structure = 1, top;
+		u8 code;
+
+		if (data[i] || data[i + 1] || data[i + 2] != 1)
+			continue;
+		code = data[i + 3];
+		header = data + i + 4;
+		size = bytes - i - 4;
+		if (code == 0xb0) {
+			/* low_delay is sequence-header bit 89, MSB first. */
+			if (size < 12)
+				return -EINVAL;
+			ctx->avsm_plus = header[0] == 0x48;
+			ctx->avsm_low_delay = header[11] & BIT(6);
+		}
+		if (code != 0xb3 && code != 0xb6)
+			continue;
+		/* AVS+ adds marker_bit and seven bbv_delay_extension bits. */
+		pos = ctx->avsm_plus ? 24 : 16;
+		type = code == 0xb6 ? avsm_read_bits(header, size, &pos, 2) : 0;
+		if (type > 2)
+			return -EINVAL;
+		if (code == 0xb3) {
+			if (avsm_read_bits(header, size, &pos, 1))
+				avsm_read_bits(header, size, &pos, 24);
+			/* FFmpeg cavsdec's compatibility with marker-less old clips. */
+			peek = pos;
+			if (ctx->avsm_low_delay ||
+			    !(avsm_read_bits(header, size, &peek, 9) & 1))
+				ctx->avsm_modern_header = true;
+			peek = pos;
+			if (avsm_read_bits(header, size, &peek, 11) & 3)
+				ctx->avsm_modern_header = true;
+			if (ctx->avsm_plus || ctx->avsm_modern_header)
+				avsm_read_bits(header, size, &pos, 1);
+		}
+		avsm_read_bits(header, size, &pos, 8); /* picture_distance */
+		if (ctx->avsm_low_delay) {
+			u32 zeros = 0;
+
+			while (!avsm_read_bits(header, size, &pos, 1))
+				if (pos == U32_MAX || ++zeros > 31)
+					return -EINVAL;
+			avsm_read_bits(header, size, &pos, zeros);
+		}
+		progressive = avsm_read_bits(header, size, &pos, 1);
+		if (!progressive)
+			structure = avsm_read_bits(header, size, &pos, 1);
+		if (!structure && code == 0xb6)
+			avsm_read_bits(header, size, &pos, 1);
+		top = avsm_read_bits(header, size, &pos, 1);
+		if (pos == U32_MAX)
+			return -EINVAL;
+		*info = type << 3 | (!progressive ? BIT(7) : 0) |
+			(top ? BIT(6) : 0);
+		return 0;
+	}
+	return 0; /* Header-only OUTPUT carries no picture token. */
+}
+
+static int avsm_queue_input(struct amvdec_session *sess,
+			    struct vb2_v4l2_buffer *vbuf)
+{
+	struct codec_legacy *ctx = sess->priv;
+	struct vb2_buffer *vb = &vbuf->vb2_buf;
+	u32 bytes = vb2_get_plane_payload(vb, 0), offset, physical, span;
+	const u8 *data = vb2_plane_vaddr(vb, 0);
+	int ret = 0;
+
+	mutex_lock(&ctx->output_lock);
+	if (!ctx->configured || ctx->avsm_input_pending) {
+		mutex_unlock(&ctx->output_lock);
+		return -EAGAIN;
+	}
+	if (ctx->failed) {
+		ret = -EIO;
+		goto error;
+	}
+	if (!data || !bytes || bytes > sess->vififo_size - SZ_1K - 64) {
+		ret = -EINVAL;
+		goto error;
+	}
+	ret = legacy_es_prepare_input(sess, vbuf, &bytes);
+	if (ret)
+		goto error;
+	/* This format does not advertise CONTINUOUS_BYTESTREAM: an OUTPUT
+	 * contains at most one coded picture, including its preceding headers. */
+	if (sess->input_frames > 1) {
+		ret = -EINVAL;
+		goto error;
+	}
+	ret = avsm_picture_info(ctx, data, bytes, &ctx->avsm_frame_info);
+	if (ret)
+		goto error;
+	span = ALIGN(bytes + SZ_1K, 64);
+	offset = sess->stream_offset;
+	physical = offset % sess->vififo_size;
+	if (physical + span > sess->vififo_size) {
+		offset += sess->vififo_size - physical;
+		physical = 0;
+	}
+	sess->input_size = bytes;
+	ret = amvdec_add_ts(sess, vb->timestamp, vbuf->timecode, offset, vbuf->flags);
+	if (ret)
+		goto error;
+	memcpy(sess->vififo_vaddr + physical, data, bytes);
+	memset(sess->vififo_vaddr + physical + bytes, 0, span - bytes);
+	dma_wmb();
+	sess->stream_offset = offset + span;
+	sess->stream_write = (physical + span) % sess->vififo_size;
+	ctx->avsm_frame_offset = offset;
+	ctx->avsm_frame_bytes = bytes;
+	ctx->avsm_frame_pictures = sess->input_frames;
+	ctx->avsm_committed = sess->stream_offset;
+	ctx->avsm_input_pending = true;
+	ctx->avsm_empty = false;
+	if (sess->input_frames)
+		atomic_inc(&sess->esparser_queued_bufs);
+	v4l2_m2m_src_buf_remove_by_buf(sess->m2m_ctx, vbuf);
+	vbuf->flags = 0;
+	vbuf->field = V4L2_FIELD_NONE;
+	vbuf->sequence = sess->sequence_out++;
+	v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_DONE);
+	avsm_service(sess);
+	mutex_unlock(&ctx->output_lock);
+	return 0;
+error:
+	mutex_unlock(&ctx->output_lock);
+	v4l2_m2m_src_buf_remove_by_buf(sess->m2m_ctx, vbuf);
+	v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
+	return ret;
+}
+
+static int avsm_drain_step(struct amvdec_session *sess)
+{
+	struct codec_legacy *ctx = sess->priv;
+	int result = 0;
+
+	mutex_lock(&ctx->output_lock);
+	avsm_service(sess);
+	if (ctx->failed) {
+		result = -EIO;
+		goto unlock;
+	}
+	/* At idle, only the single completed, undisplayed I/P named by ANC0
+	 * may be the delayed reference tail. EMPTY alone never completes a raster.
+	 */
+	if (!ctx->avsm_running && ctx->avsm_empty &&
+	    ctx->avsm_empty_at == ctx->avsm_committed &&
+	    ctx->avsm_committed == READ_ONCE(sess->stream_offset)) {
+		u32 i, tail = U32_MAX;
+
+		if (ctx->avsm_display_count)
+			goto unlock;
+		for (i = 0; i < ctx->buffers; i++) {
+			struct avsm_picture *pic = &ctx->avsm_pics[i];
+
+			if (!pic->valid || pic->displayed)
+				continue;
+			if (tail != U32_MAX || ((pic->info >> 3) & 7) > 1) {
+				result = -ENODATA;
+				goto unlock;
+			}
+			tail = i;
+		}
+		if (tail != U32_MAX) {
+			if (atomic_read(&sess->esparser_queued_bufs) != 1 ||
+			    (amvdec_read_dos(sess->core, AVSM_REG(0x990)) & 0xffff) !=
+			    (ctx->canvases[tail] & 0xffff)) {
+				result = -ENODATA;
+				goto unlock;
+			}
+			avsm_queue_display(ctx, tail);
+		}
+		avsm_publish(sess);
+		if (!ctx->failed && !ctx->avsm_display_count &&
+		    !atomic_read(&sess->esparser_queued_bufs)) {
+			amvdec_eos(sess);
+			result = 1;
+		} else if (!ctx->failed && !ctx->avsm_display_count) {
+			dev_err(sess->core->dev,
+				"AVSM EMPTY leaves %d input tokens without completed display\n",
+				atomic_read(&sess->esparser_queued_bufs));
+			result = -ENODATA;
+		}
+	}
+unlock:
+	mutex_unlock(&ctx->output_lock);
+	return result;
 }
 
 static irqreturn_t legacy_isr(struct amvdec_session *sess)
@@ -911,47 +1580,40 @@ static irqreturn_t legacy_isr(struct amvdec_session *sess)
 	return IRQ_WAKE_THREAD;
 }
 
-static irqreturn_t legacy_threaded_isr(struct amvdec_session *sess)
+static irqreturn_t legacy_process_output(struct amvdec_session *sess)
 {
 	struct codec_legacy *ctx = sess->priv;
 	struct amvdec_core *core = sess->core;
 	u32 reg, idx, type, field = V4L2_FIELD_NONE, errors = 0;
-	u32 offset, size, width = sess->width, height = sess->height;
+	u32 offset, width = sess->width, height = sess->height;
 	struct v4l2_fract sar = sess->pixelaspect;
 	bool metadata_changed;
 
 	if (!ctx || ctx->failed)
 		return IRQ_HANDLED;
-	if ((ctx->codec == LEGACY_MPEG4 && amvdec_read_dos(core, AV_SCRATCH_L)) ||
-	    ((ctx->codec == LEGACY_VC1 || ctx->codec == LEGACY_AVS) &&
-	     amvdec_read_dos(core, AV_SCRATCH_7))) {
+	if (ctx->codec == LEGACY_AVS)
+		return avsm_process_output(sess);
+	if (ctx->codec == LEGACY_VC1 && amvdec_read_dos(core, AV_SCRATCH_7)) {
 		legacy_abort(sess);
 		return IRQ_HANDLED;
 	}
 	reg = amvdec_read_dos(core, LEGACY_BUFFEROUT);
 	if (!reg)
 		return IRQ_HANDLED;
-	idx = ctx->codec == LEGACY_MPEG4 ? reg & 7 : ((reg & 7) - 1) & 7;
+	idx = ((reg & 7) - 1) & 7;
 	if (idx >= ctx->buffers) {
 		legacy_abort(sess);
 		return IRQ_HANDLED;
 	}
 	type = ctx->codec == LEGACY_MJPEG ? 0 : (reg >> 3) & 7;
-	if (ctx->codec == LEGACY_MPEG4) {
-		size = amvdec_read_dos(core, AV_SCRATCH_7);
-		width = size >> 16;
-		height = size & 0xffff;
-	} else if (ctx->codec == LEGACY_VC1) {
+	if (ctx->codec == LEGACY_VC1) {
 		width = amvdec_read_dos(core, AV_SCRATCH_J);
 		height = amvdec_read_dos(core, AV_SCRATCH_K);
-	} else if (ctx->codec == LEGACY_AVS) {
-		width = amvdec_read_dos(core, AV_SCRATCH_1);
-		height = amvdec_read_dos(core, AV_SCRATCH_2);
 	}
 	if (ctx->codec != LEGACY_MJPEG) {
 		errors = amvdec_read_dos(core, AV_SCRATCH_6);
-		sar = legacy_aspect(ctx->codec, width, height, amvdec_read_dos(core,
-			ctx->codec == LEGACY_MPEG4 ? AV_SCRATCH_5 : AV_SCRATCH_0));
+		sar = legacy_aspect(ctx->codec, width, height,
+			amvdec_read_dos(core, AV_SCRATCH_0));
 		if (reg & BIT(7)) {
 			bool top_first = reg & BIT(6);
 
@@ -991,6 +1653,18 @@ static irqreturn_t legacy_threaded_isr(struct amvdec_session *sess)
 	}
 	offset = amvdec_read_dos(core, ctx->codec == LEGACY_MJPEG ?
 				 AV_SCRATCH_A : LEGACY_OFFSET);
+	dev_dbg(core->dev,
+		"legacy output codec=%u reg=%#x index=%u offset=%#x type=%u repeat=%u errors=%u\n",
+		ctx->codec, reg, idx, offset, type,
+		amvdec_read_dos(core, AV_SCRATCH_A), errors);
+	if (ctx->codec == LEGACY_MJPEG)
+		dev_dbg(core->dev,
+			"legacy JPEG scaler ctrl=%#x ctrl1=%#x ctrl2=%#x canvas_wr=%#x pic_dc=%#x\n",
+			amvdec_read_dos(core, PSCALE_CTRL),
+			amvdec_read_dos(core, 0x24a4), /* PSCALE_CTRL1 */
+			amvdec_read_dos(core, 0x24b8), /* PSCALE_CTRL2 */
+			amvdec_read_dos(core, 0x24b4), /* PSCALE_CANVAS_WR_ADDR */
+			amvdec_read_dos(core, MDEC_PIC_DC_CTRL));
 	if (!sess->keyframe_found && type != 0) {
 		/* Keep the surface queued while firmware discards pre-intra output. */
 		legacy_recycle(core, idx);
@@ -1005,23 +1679,24 @@ static irqreturn_t legacy_threaded_isr(struct amvdec_session *sess)
 	return IRQ_HANDLED;
 }
 
-static const u8 mpeg4_eos[SZ_1K] = { 0, 0, 1, 0xb1 };
+static irqreturn_t legacy_threaded_isr(struct amvdec_session *sess)
+{
+	struct codec_legacy *ctx = sess->priv;
+	irqreturn_t ret;
+
+	if (!ctx)
+		return IRQ_HANDLED;
+	mutex_lock(&ctx->output_lock);
+	ret = legacy_process_output(sess);
+	mutex_unlock(&ctx->output_lock);
+	return ret;
+}
+
 static const u8 vc1_eos[SZ_1K] = { 0, 0, 1, 0x0a };
-static const u8 avs_eos[SZ_1K] = { 0, 0, 1, 0xb1 };
 static const u8 mjpeg_eos[SZ_1K] = { 0xff, 0xd9 };
-static const u8 *mpeg4_end(u32 *len) { *len = sizeof(mpeg4_eos); return mpeg4_eos; }
 static const u8 *vc1_end(u32 *len) { *len = sizeof(vc1_eos); return vc1_eos; }
-static const u8 *avs_end(u32 *len) { *len = sizeof(avs_eos); return avs_eos; }
 static const u8 *mjpeg_end(u32 *len) { *len = sizeof(mjpeg_eos); return mjpeg_eos; }
 
-struct amvdec_codec_ops codec_mpeg4_ops = {
-	.start = mpeg4_start, .stop = legacy_stop,
-	.resume = legacy_resume,
-	.prepare_input = mpeg4_prepare_input,
-	.isr = legacy_isr, .threaded_isr = legacy_threaded_isr,
-	.can_recycle = legacy_can_recycle, .recycle = legacy_recycle,
-	.eos_sequence = mpeg4_end,
-};
 struct amvdec_codec_ops codec_vc1_ops = {
 	.start = vc1_start, .stop = legacy_stop,
 	.resume = legacy_resume, .prepare_input = vc1_prepare_input,
@@ -1031,11 +1706,12 @@ struct amvdec_codec_ops codec_vc1_ops = {
 };
 struct amvdec_codec_ops codec_avs_ops = {
 	.start = avs_start, .stop = legacy_stop,
+	.manages_processor = true,
 	.resume = legacy_resume,
-	.prepare_input = legacy_es_prepare_input,
+	.queue_input = avsm_queue_input,
 	.isr = legacy_isr, .threaded_isr = legacy_threaded_isr,
 	.can_recycle = legacy_can_recycle, .recycle = legacy_recycle,
-	.eos_sequence = avs_end,
+	.drain_step = avsm_drain_step,
 };
 struct amvdec_codec_ops codec_mjpeg_ops = {
 	.start = mjpeg_start, .stop = legacy_stop,

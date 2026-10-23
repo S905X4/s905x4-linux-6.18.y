@@ -10,5 +10,9 @@
 #include "vdec.h"
 
 extern struct amvdec_ops vdec_1_ops;
+/* SC2 stopped run boundary: optional codec reset precedes the common core reset.
+ * Any drain failure retains quarantined resources.
+ */
+int amvdec_vdec1_reset(struct amvdec_session *sess, u32 reset_mask);
 
 #endif

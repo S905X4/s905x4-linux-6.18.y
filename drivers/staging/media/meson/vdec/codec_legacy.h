@@ -4,7 +4,9 @@
 
 #include "vdec.h"
 
-extern struct amvdec_codec_ops codec_mpeg4_ops;
+/* Factory avs_multi image; the single avs image fixes its canvas IDs at zero. */
+#define MESON_AVS_FIRMWARE_INDEX 0x4156534d
+
 extern struct amvdec_codec_ops codec_vc1_ops;
 extern struct amvdec_codec_ops codec_avs_ops;
 extern struct amvdec_codec_ops codec_mjpeg_ops;

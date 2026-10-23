@@ -109,7 +109,6 @@ static int vdec_1_stbuf_power_up(struct amvdec_session *sess)
 
 	amvdec_write_dos_bits(core, VLD_MEM_VIFIFO_BUF_CNTL, 1);
 	amvdec_clear_dos_bits(core, VLD_MEM_VIFIFO_BUF_CNTL, 1);
-
 	amvdec_write_dos_bits(core, VLD_MEM_VIFIFO_CONTROL,
 			      (0x11 << MEM_FIFO_CNT_BIT) | MEM_FILL_ON_LEVEL |
 			      MEM_CTRL_FILL_EN | MEM_CTRL_EMPTY_EN);
@@ -157,10 +156,53 @@ static int vdec_1_sc2_drain(struct amvdec_core *core)
 				 value & BIT(21), 10, 100000);
 }
 
+int amvdec_vdec1_reset(struct amvdec_session *sess, u32 reset_mask)
+{
+	struct amvdec_core *core = sess->core;
+	u32 dmc, mask;
+	int ret;
+
+	if (core->platform->revision != VDEC_REVISION_SC2)
+		return -EOPNOTSUPP;
+	if (core->quarantined)
+		return -EIO;
+	if (sess->processor_started || amvdec_read_dos(core, MPSR) ||
+	    amvdec_read_dos(core, CPSR))
+		return -EBUSY;
+	dmc = readl(core->dmc_base);
+	mask = amvdec_read_dos(core, ASSIST_MBOX1_MASK);
+	ret = vdec_1_sc2_drain(core);
+	if (ret) {
+		core->quarantined = true;
+		__module_get(THIS_MODULE);
+		dev_crit(core->dev, "VDEC reset DMA not idle: retaining DOS lease, power and all buffers; reboot required\n");
+		return ret;
+	}
+	if (reset_mask) {
+		u32 power = amvdec_read_dos(core, POWER_CTL_VLD);
+
+		amvdec_write_dos(core, DOS_SW_RESET0, reset_mask);
+		amvdec_write_dos(core, DOS_SW_RESET0, 0);
+		amvdec_read_dos(core, DOS_SW_RESET0);
+		amvdec_write_dos(core, POWER_CTL_VLD, power);
+	}
+	amvdec_write_dos(core, DOS_SW_RESET0,
+			 BIT(3) | BIT(4) | BIT(5) | BIT(7) | BIT(8) | BIT(9));
+	amvdec_write_dos(core, DOS_SW_RESET0, 0);
+	amvdec_read_dos(core, DOS_SW_RESET0);
+	writel((readl(core->dmc_base) & ~BIT(21)) | (dmc & BIT(21)), core->dmc_base);
+	amvdec_write_dos(core, ASSIST_MBOX1_MASK, mask);
+	return 0;
+}
+
 static int vdec_1_sc2_stop(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
-	int ret = vdec_1_sc2_drain(core);
+	int ret;
+
+	if (core->quarantined)
+		return -EIO;
+	ret = vdec_1_sc2_drain(core);
 
 	disable_irq(core->irq);
 	if (ret) {
@@ -250,8 +292,9 @@ static int vdec_1_sc2_start(struct amvdec_session *sess)
 		amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(17));
 	amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(16));
 	enable_irq(core->irq);
-	if (!sess->fmt_out->needs_capture ||
-	    (sess->streamon_cap && sess->status != STATUS_NEEDS_RESUME)) {
+	if (!sess->fmt_out->codec_ops->manages_processor &&
+	    (!sess->fmt_out->needs_capture ||
+	     (sess->streamon_cap && sess->status != STATUS_NEEDS_RESUME))) {
 		amvdec_write_dos(core, MPSR, 1);
 		sess->processor_started = true;
 	}

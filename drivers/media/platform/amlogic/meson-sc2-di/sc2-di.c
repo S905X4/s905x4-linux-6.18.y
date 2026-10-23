@@ -519,6 +519,7 @@ static int di_try_fmt(struct file *file, void *fh, struct v4l2_format *f)
 {
 	struct v4l2_pix_format_mplane *p = &f->fmt.pix_mp;
 	unsigned int i;
+	u32 alignment = V4L2_TYPE_IS_OUTPUT(f->type) ? 32 : 64;
 
 	p->pixelformat = V4L2_PIX_FMT_NV12M;
 	p->width = clamp_t(u32, ALIGN(p->width, 2), 32, 1920);
@@ -529,8 +530,9 @@ static int di_try_fmt(struct file *file, void *fh, struct v4l2_format *f)
 	else if (p->field != V4L2_FIELD_INTERLACED_BT)
 		p->field = V4L2_FIELD_INTERLACED_TB;
 	for (i = 0; i < 2; i++) {
+		/* SC2 DIWR uses 64-byte bursts; a 32-byte-only stride aliases rows. */
 		p->plane_fmt[i].bytesperline = ALIGN(clamp_t(u32,
-			p->plane_fmt[i].bytesperline, p->width, 4096), 32);
+			p->plane_fmt[i].bytesperline, p->width, 4096), alignment);
 		p->plane_fmt[i].sizeimage = p->plane_fmt[i].bytesperline * (p->height >> i);
 	}
 	if (p->colorspace == V4L2_COLORSPACE_DEFAULT)

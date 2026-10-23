@@ -126,6 +126,17 @@ struct amvdec_ops {
  * @stop: mandatory call when the codec needs to stop
  * @load_extended_firmware: optional call to load additional firmware bits
  * @num_pending_bufs: optional call to get the number of dst buffers on hold
+ * @queue_input: optional codec-owned framed submission; consumes OUTPUT on
+ *               success/error, or returns -EAGAIN leaving OUTPUT queued
+ * @input_committed: optional SC2 notification after coded bytes and the VIFIFO
+ *                   write pointer are visible; offset is the stream byte offset
+ * @input_read_pointer: optional SC2 physical VIFIFO read pointer retaining any
+ *                      bytes required to restart an incomplete picture
+ * @drain_step: optional SC2 host-DPB drain after all OUTPUT buffers are committed;
+ *              0 waits, 1 means EOS was published, negative errors abort
+ *              These input/drain callbacks run with the session mutex held.
+ * @manages_processor: SC2 codec starts its processor only after input and an
+ *                     owned reconstruction surface are ready
  * @can_recycle: optional call to know if the codec is ready to recycle
  *		 a dst buffer
  * @recycle: optional call to tell the codec to recycle a dst buffer. Must go
@@ -138,6 +149,7 @@ struct amvdec_ops {
  * @threaded_isr: mandatory call for the threaded ISR
  */
 struct amvdec_codec_ops {
+	bool manages_processor;
 	int (*start)(struct amvdec_session *sess);
 	int (*stop)(struct amvdec_session *sess);
 	int (*load_extended_firmware)(struct amvdec_session *sess,
@@ -145,6 +157,10 @@ struct amvdec_codec_ops {
 	u32 (*num_pending_bufs)(struct amvdec_session *sess);
 	int (*prepare_input)(struct amvdec_session *sess,
 			     struct vb2_v4l2_buffer *vbuf, u32 *payload_size);
+	int (*queue_input)(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf);
+	void (*input_committed)(struct amvdec_session *sess, u32 offset, u32 bytes);
+	u32 (*input_read_pointer)(struct amvdec_session *sess);
+	int (*drain_step)(struct amvdec_session *sess);
 	int (*can_recycle)(struct amvdec_core *core);
 	void (*recycle)(struct amvdec_core *core, u32 buf_idx);
 	void (*drain)(struct amvdec_session *sess);
@@ -276,7 +292,7 @@ struct amvdec_session {
 	bool draining;
 	bool eos_queued;
 	unsigned long drain_deadline;
-	unsigned long drain_empty_since;
+	u32 drain_padding;
 	struct delayed_work drain_work;
 	u32 colorspace;
 	u8 ycbcr_enc;

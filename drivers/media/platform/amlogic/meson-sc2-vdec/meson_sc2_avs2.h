@@ -172,6 +172,7 @@ static void sc2_avs2_parser(struct meson_sc2_hevc_context *ctx, size_t length)
 	struct sc2_avs2_state *st = ctx->avs2;
 	u32 b = lower_32_bits(ctx->work_dma);
 	u32 in = lower_32_bits(ctx->input_dma);
+	u32 above;
 	unsigned int i;
 
 	sc2_write(hw, HEVCD_IPP_LINEBUFF_BASE, b + A2_IPP);
@@ -240,6 +241,17 @@ static void sc2_avs2_parser(struct meson_sc2_hevc_context *ctx, size_t length)
 	sc2_write(hw, HEVC_PARSER_IF_CONTROL, BIT(9) | BIT(5) | BIT(2) | BIT(0));
 	sc2_write(hw, HEVC_MPRED_INT_STATUS, BIT(31));
 	sc2_write(hw, A2_PARSER_RESULT3, U32_MAX);
+	/* Vendor multi-instance initialization resets MPRED after enabling the
+	 * parser interfaces, then restores its above-buffer latch three times.
+	 * The shared core reset before parser setup does not replace this step.
+	 */
+	for (i = 0; i < 8; i++)
+		above = sc2_read(hw, HEVC_MPRED_ABV_START_ADDR);
+	sc2_write(hw, SC2_DOS_SW_RESET3, BIT(18));
+	sc2_write(hw, SC2_DOS_SW_RESET3, 0);
+	sc2_write(hw, HEVC_MPRED_ABV_START_ADDR, above);
+	sc2_write(hw, HEVC_MPRED_ABV_START_ADDR, above);
+	sc2_write(hw, HEVC_MPRED_ABV_START_ADDR, above);
 	sc2_write(hw, HEVCD_IPP_TOP_CNTL, 1);
 	sc2_write(hw, HEVCD_IPP_TOP_CNTL, 2);
 	sc2_write(hw, HEVC_DBLK_CFGB,
@@ -576,7 +588,7 @@ static int sc2_avs2_run(struct meson_sc2_hevc_context *ctx,
 	struct meson_sc2_hw *hw = ctx->hw;
 	struct sc2_avs2_state *st = ctx->avs2;
 	unsigned long deadline = jiffies + SC2_JOB_TIMEOUT, remaining;
-	u32 status, sequence, code;
+	u32 status, sequence, code, debug_tag, header_history = 0;
 	u8 pending[64];
 	unsigned int notifications = 0, pending_count = 0, i;
 	int ret;
@@ -592,20 +604,46 @@ static int sc2_avs2_run(struct meson_sc2_hevc_context *ctx,
 	for (;;) {
 		if (atomic_read(&ctx->aborted))
 			return -ECANCELED;
-		if (time_after_eq(jiffies, deadline))
-			return -ETIMEDOUT;
+		if (time_after_eq(jiffies, deadline)) {
+			ret = -ETIMEDOUT;
+			goto failed;
+		}
 		sequence = smp_load_acquire(&hw->irq_sequence);
 		status = sc2_read(hw, HEVC_ASSIST_SCRATCH_0) & 0xff;
+		/* The vendor hard IRQ handles DEBUG_REG1 before interpreting status:
+		 * firmware may pause for this acknowledgment while status still holds
+		 * its internal sequence/I/PB parsing state, before RPM is exported.
+		 */
+		debug_tag = sc2_read(hw, HEVC_ASSIST_SCRATCH_G);
+		if (debug_tag) {
+			dev_info_ratelimited(hw->dev,
+				"AVS2 firmware debug tag=%#x value=%#x status=%#x bytes=%u\n",
+				debug_tag, sc2_read(hw, HEVC_ASSIST_SCRATCH_H),
+				status, sc2_read(hw, HEVC_SHIFT_BYTE_COUNT));
+			/* Never acknowledge a firmware-requested pause as normal debug. */
+			if (debug_tag & BIT(17)) {
+				ret = -EIO;
+				goto failed;
+			}
+			sc2_write(hw, HEVC_ASSIST_SCRATCH_G, 0);
+			if (!(debug_tag & BIT(16)))
+				continue;
+		}
 		if (status >= 0x21 && status <= 0x25) {
-			if (++notifications > 64)
-				return -EPROTO;
+			header_history = (header_history << 8) | status;
+			if (++notifications > 64) {
+				ret = -EPROTO;
+				goto failed;
+			}
 			if (status == 0x22 || status == 0x23) {
-				if (*picture)
-					return -EBADMSG;
+				if (*picture) {
+					ret = -EBADMSG;
+					goto failed;
+				}
 				ret = sc2_avs2_header(ctx, job, result, status,
 						     pending, pending_count);
 				if (ret)
-					return ret;
+					goto failed;
 				*picture = true;
 				pending_count = 0;
 			} else {
@@ -613,8 +651,10 @@ static int sc2_avs2_run(struct meson_sc2_hevc_context *ctx,
 				       status == 0x24 ? SEQUENCE_END_CODE :
 				       sc2_read(hw, HEVC_ASSIST_SCRATCH_J) & 0xff;
 				if (code != SEQUENCE_HEADER_CODE && code != SEQUENCE_END_CODE &&
-				    code != VIDEO_EDIT_CODE)
-					return -EBADMSG;
+				    code != VIDEO_EDIT_CODE) {
+					ret = -EBADMSG;
+					goto failed;
+				}
 				pending[pending_count++] = code;
 				if (code == SEQUENCE_HEADER_CODE)
 					st->start_flag |= 1;
@@ -629,17 +669,19 @@ static int sc2_avs2_run(struct meson_sc2_hevc_context *ctx,
 			if (!*picture || lcu + 1 != st->dec.lcu_total ||
 			    sc2_read(hw, HEVC_SHIFT_BYTE_COUNT) > job->size + SC2_INPUT_PADDING ||
 			    (sc2_read(hw, SC2_SAO_MMU_STATUS) >> 16) >
-			    DIV_ROUND_UP(st->dec.hc.cur_pic->comp_body_size, SZ_4K))
-				return -EIO;
+			    DIV_ROUND_UP(st->dec.hc.cur_pic->comp_body_size, SZ_4K)) {
+				ret = -EIO;
+				goto failed;
+			}
 			st->dec.hc.cur_pic->decoded_lcu = st->dec.lcu_total;
 			st->start_flag |= 3;
 			return 0;
 		}
 		if (status >= 0x31 && status <= 0x36) {
-			if (status == 0x34)
-				return -ETIMEDOUT;
-			if (status == 0x35)
-				return -EOVERFLOW;
+			if (status == 0x34 || status == 0x35) {
+				ret = status == 0x34 ? -ETIMEDOUT : -EOVERFLOW;
+				goto failed;
+			}
 			/* Header-only access units legitimately exhaust input without
 			 * a decoded picture. Exhaustion during a picture is corruption.
 			 */
@@ -647,20 +689,64 @@ static int sc2_avs2_run(struct meson_sc2_hevc_context *ctx,
 			    (status == 0x32 || status == 0x33 || status == 0x36)) {
 				for (i = 0; i < pending_count; i++) {
 					avs2_prepare_header(&st->dec, pending[i]);
-					if (st->dec.error)
-						return st->dec.error;
+					if (st->dec.error) {
+						ret = st->dec.error;
+						goto failed;
+					}
 				}
 				result->hidden = true;
 				return 0;
 			}
-			return -EBADMSG;
+			ret = -EBADMSG;
+			goto failed;
 		}
 		remaining = deadline - jiffies;
-		if ((long)remaining <= 0)
-			return -ETIMEDOUT;
+		if ((long)remaining <= 0) {
+			ret = -ETIMEDOUT;
+			goto failed;
+		}
 		wait_event_timeout(hw->wait, atomic_read(&ctx->aborted) ||
 			smp_load_acquire(&hw->irq_sequence) != sequence, remaining);
 	}
+failed:
+	/* Sample before drain/reset destroys the firmware's rejection context.
+	 * EPIPE is the expected geometry probe, not a decode failure.
+	 */
+	if (ret != -EPIPE) {
+		const __le16 *raw = ctx->work + A2_RPM;
+		union param_u *p = &st->dec.param;
+
+		dma_rmb();
+		for (i = 0; i < ARRAY_SIZE(p->l.data); i++)
+			p->l.data[i] = le16_to_cpu(raw[(i & ~3U) + 3 - (i & 3)]);
+		dev_err_ratelimited(hw->dev,
+			"AVS2 ret=%d status=%#x notifications=%u history=%#x picture=%u mode=%#x debug=%#x/%#x rpmcmd=%#x bytes=%u/%zu RPM profile=%#x size=%ux%u chroma=%u precision=%u/%u lcu=%u/%u refs=%u remove=%u coi=%u\n",
+			ret, sc2_read(hw, HEVC_ASSIST_SCRATCH_0), notifications,
+			header_history, *picture, sc2_read(hw, HEVC_ASSIST_SCRATCH_J),
+			sc2_read(hw, HEVC_ASSIST_SCRATCH_G),
+			sc2_read(hw, HEVC_ASSIST_SCRATCH_H),
+			sc2_read(hw, HEVC_ASSIST_SCRATCH_F),
+			sc2_read(hw, HEVC_SHIFT_BYTE_COUNT), job->size,
+			p->p.profile_id, p->p.horizontal_size, p->p.vertical_size,
+			p->p.chroma_format, p->p.sample_precision,
+			p->p.encoding_precision, p->p.lcu_size,
+			p->p.g_uiMaxSizeInBit, p->p.num_of_ref_cur,
+			p->p.num_to_remove_cur, p->p.coding_order);
+		dev_err_ratelimited(hw->dev,
+			"AVS2 parser pc=%#x lmem=%#x cmd=%#x fetch=%#x header=%#x irq=%#x shift=%#x cabac=%#x level=%u rd=%#x wr=%#x\n",
+			sc2_read(hw, A2_REG(0x3308)),
+			sc2_read(hw, SC2_LMEM_DMA_CTRL),
+			sc2_read(hw, HEVC_PARSER_CMD_STATUS),
+			sc2_read(hw, HEVC_PARSER_CMD_FETCH),
+			sc2_read(hw, HEVC_PARSER_HEADER_INFO),
+			sc2_read(hw, HEVC_PARSER_INT_STATUS),
+			sc2_read(hw, HEVC_SHIFT_STATUS),
+			sc2_read(hw, HEVC_CABAC_CONTROL),
+			sc2_read(hw, HEVC_STREAM_LEVEL),
+			sc2_read(hw, HEVC_STREAM_RD_PTR),
+			sc2_read(hw, HEVC_STREAM_WR_PTR));
+	}
+	return ret;
 }
 
 int meson_sc2_avs2_decode(struct meson_sc2_hevc_context *ctx,
