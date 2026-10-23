@@ -52,7 +52,11 @@
 #define MPEG4_INTERLACE BIT(7)
 #define MPEG4_TOP_FIRST BIT(6)
 
-static const u8 mpeg4_eos[SZ_1K] = { 0, 0, 1, 0xb1 };
+/* vmpeg4_multi.c's frame-ending padding. Sequence-end (0xb1) replays the
+ * last picture on SC2; an incomplete VOP instead produces genuine EMPTY.
+ * The padding has no coded-picture token and must never publish a picture.
+ */
+static const u8 mpeg4_padding[SZ_1K] = { 0, 0, 1, 0xb6 };
 
 /* vmpeg4_save_hw_context()/vmpeg4_hw_ctx_restore(). LMEM and quantization
  * matrices are saved by the firmware inside the persistent workspace.
@@ -748,7 +752,8 @@ static int mpeg4_drain_step(struct amvdec_session *sess)
 		goto unlock;
 	}
 	if (!m->eos_queued) {
-		ret = esparser_queue_eos(sess->core, mpeg4_eos, sizeof(mpeg4_eos));
+		ret = esparser_queue_eos(sess->core, mpeg4_padding,
+					 sizeof(mpeg4_padding));
 		if (ret == -EAGAIN) {
 			ret = 0;
 			goto unlock;
