@@ -36,7 +36,7 @@
 #include <drm/drm_of.h>
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
-
+#include <sound/asoundef.h>
 #include "dw-hdmi-audio.h"
 #include "dw-hdmi-cec.h"
 #include "dw-hdmi.h"
@@ -633,11 +633,18 @@ void dw_hdmi_set_channel_status(struct dw_hdmi *hdmi,
 				u8 *channel_status)
 {
 	/*
-	 * Set channel status register for frequency and word length.
-	 * Use default values for other registers.
+	 * Set channel status register for audio format, frequency and word length.
+	 * Write channel_status[0] to HDMI_FC_AUDSCHNLS0 so IEC958_AES0_NONAUDIO
+	 * bit 1 is propagated to the hardware channel status register for bitstream
+	 * pass-through (AC3, DTS, etc.).
 	 */
+	hdmi_writeb(hdmi, channel_status[0], HDMI_FC_AUDSCHNLS0);
 	hdmi_writeb(hdmi, channel_status[3], HDMI_FC_AUDSCHNLS7);
 	hdmi_writeb(hdmi, channel_status[4], HDMI_FC_AUDSCHNLS8);
+
+	mutex_lock(&hdmi->audio_mutex);
+	hdmi->sample_non_pcm = (channel_status[0] & IEC958_AES0_NONAUDIO) != 0;
+	mutex_unlock(&hdmi->audio_mutex);
 }
 EXPORT_SYMBOL_GPL(dw_hdmi_set_channel_status);
 

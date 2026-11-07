@@ -26,6 +26,7 @@ properties:
           - const: amlogic,g12a-toacodec
       - items:
           - enum:
+              - amlogic,sc2-toacodec
               - amlogic,sm1-toacodec
           - const: amlogic,g12a-toacodec
 

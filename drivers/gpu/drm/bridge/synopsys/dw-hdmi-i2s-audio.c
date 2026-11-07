@@ -12,6 +12,7 @@
 #include <drm/bridge/dw_hdmi.h>
 #include <drm/drm_crtc.h>
 
+#include <sound/asoundef.h>
 #include <sound/hdmi-codec.h>
 
 #include "dw-hdmi.h"
@@ -43,6 +44,7 @@ static int dw_hdmi_i2s_hw_params(struct device *dev, void *data,
 	u8 conf0 = 0;
 	u8 conf1 = 0;
 	u8 inputclkfs = 0;
+	bool is_hbr = false;
 
 	/* it cares I2S only */
 	if (fmt->bit_clk_provider | fmt->frame_clk_provider) {
@@ -50,24 +52,38 @@ static int dw_hdmi_i2s_hw_params(struct device *dev, void *data,
 		return -EINVAL;
 	}
 
+	/* Detect HBR (Dolby TrueHD, DTS-HD MA) */
+	if ((hparms->channels == 8 && hparms->sample_rate >= 192000) ||
+	    ((hparms->iec.status[0] & IEC958_AES0_NONAUDIO) &&
+	     hparms->sample_rate >= 192000))
+		is_hbr = true;
+
 	/* Reset the FIFOs before applying new params */
 	hdmi_write(audio, HDMI_AUD_CONF0_SW_RESET, HDMI_AUD_CONF0);
+	if (is_hbr)
+		hdmi_write(audio, HDMI_AUD_CONF0_SW_RESET, HDMI_AUD_HBR_CONF0);
 	hdmi_write(audio, (u8)~HDMI_MC_SWRSTZ_I2SSWRST_REQ, HDMI_MC_SWRSTZ);
 
-	inputclkfs	= HDMI_AUD_INPUTCLKFS_64FS;
-	conf0		= (HDMI_AUD_CONF0_I2S_SELECT | HDMI_AUD_CONF0_I2S_EN0);
+	inputclkfs = HDMI_AUD_INPUTCLKFS_64FS;
+	if (is_hbr) {
+		conf0 = (HDMI_AUD_CONF0_HBR | HDMI_AUD_CONF0_I2S_EN0 |
+			 HDMI_AUD_CONF0_I2S_EN1 | HDMI_AUD_CONF0_I2S_EN2 |
+			 HDMI_AUD_CONF0_I2S_EN3);
+	} else {
+		conf0 = (HDMI_AUD_CONF0_I2S_SELECT | HDMI_AUD_CONF0_I2S_EN0);
 
-	/* Enable the required i2s lanes */
-	switch (hparms->channels) {
-	case 7 ... 8:
-		conf0 |= HDMI_AUD_CONF0_I2S_EN3;
-		fallthrough;
-	case 5 ... 6:
-		conf0 |= HDMI_AUD_CONF0_I2S_EN2;
-		fallthrough;
-	case 3 ... 4:
-		conf0 |= HDMI_AUD_CONF0_I2S_EN1;
-		/* Fall-thru */
+		/* Enable the required i2s lanes */
+		switch (hparms->channels) {
+		case 7 ... 8:
+			conf0 |= HDMI_AUD_CONF0_I2S_EN3;
+			fallthrough;
+		case 5 ... 6:
+			conf0 |= HDMI_AUD_CONF0_I2S_EN2;
+			fallthrough;
+		case 3 ... 4:
+			conf0 |= HDMI_AUD_CONF0_I2S_EN1;
+			/* Fall-thru */
+		}
 	}
 
 	switch (hparms->sample_width) {
@@ -103,12 +119,22 @@ static int dw_hdmi_i2s_hw_params(struct device *dev, void *data,
 
 	dw_hdmi_set_sample_rate(hdmi, hparms->sample_rate);
 	dw_hdmi_set_channel_status(hdmi, hparms->iec.status);
-	dw_hdmi_set_channel_count(hdmi, hparms->channels);
+	dw_hdmi_set_channel_count(hdmi, is_hbr ? 8 : hparms->channels);
 	dw_hdmi_set_channel_allocation(hdmi, hparms->cea.channel_allocation);
 
 	hdmi_write(audio, inputclkfs, HDMI_AUD_INPUTCLKFS);
 	hdmi_write(audio, conf0, HDMI_AUD_CONF0);
+	if (is_hbr)
+		hdmi_write(audio, conf0, HDMI_AUD_HBR_CONF0);
 	hdmi_write(audio, conf1, HDMI_AUD_CONF1);
+
+	/* Toggle software reset to ensure FIFOs are flushed and operational */
+	hdmi_write(audio, conf0 | HDMI_AUD_CONF0_SW_RESET, HDMI_AUD_CONF0);
+	if (is_hbr)
+		hdmi_write(audio, conf0 | HDMI_AUD_CONF0_SW_RESET, HDMI_AUD_HBR_CONF0);
+	hdmi_write(audio, conf0, HDMI_AUD_CONF0);
+	if (is_hbr)
+		hdmi_write(audio, conf0, HDMI_AUD_HBR_CONF0);
 
 	return 0;
 }
