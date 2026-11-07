@@ -8,16 +8,20 @@
 #include "meson-sc2.dtsi"
 #include <dt-bindings/leds/common.h>
 #include <dt-bindings/sound/meson-g12a-tohdmitx.h>
+#include <dt-bindings/sound/meson-g12a-toacodec.h>
 
 &vdec {
+	memory-region = <&vdec_cma>;
 	status = "okay";
 };
 
 &vdec_1 {
+	memory-region = <&vdec_cma>;
 	status = "okay";
 };
 
 &di {
+	memory-region = <&vdec_cma>;
 	status = "okay";
 };
 
@@ -55,7 +59,14 @@
 
 	reserved-memory {
 		linux,cma {
-			size = <0x0 0x20000000>;
+			size = <0x0 0x10000000>;
+		};
+
+		vdec_cma: vdec-cma {
+			compatible = "shared-dma-pool";
+			reusable;
+			size = <0x0 0x1c000000>;
+			alignment = <0x0 0x400000>;
 		};
 	};
 
@@ -69,61 +80,14 @@
 		};
 	};
 
-	i2c-panel {
-		compatible = "i2c-gpio";
-		sda-gpios = <&gpio GPIOA_14 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		scl-gpios = <&gpio GPIOA_15 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
-		i2c-gpio,delay-us = <5>;
-		#address-cells = <1>;
-		#size-cells = <0>;
-
-		display-controller@24 {
-			compatible = "fdhisi,fd6551";
-			reg = <0x24>;
-			fdhisi,digits = <4 3 2 1>;
-			default-brightness-level = <8>;
-			#address-cells = <1>;
-			#size-cells = <0>;
-
-			display {
-				function = "display";
-			};
-
-			led@0 {
-				reg = <0>;
-				function = "alarm";
-			};
-
-			led@1 {
-				reg = <1>;
-				function = "usb";
-			};
-
-			led@2 {
-				reg = <2>;
-				function = "pause";
-			};
-
-			led@3 {
-				reg = <3>;
-				function = "play";
-			};
-
-			led@4 {
-				reg = <4>;
-				function = "colon";
-			};
-
-			led@5 {
-				reg = <5>;
-				function = "lan";
-			};
-
-			led@6 {
-				reg = <6>;
-				function = "wlan";
-			};
-		};
+	openvfd {
+		compatible = "open,vfd";
+		openvfd_gpio_clk = <&gpio GPIOA_15 GPIO_ACTIVE_HIGH>;
+		openvfd_gpio_dat = <&gpio GPIOA_14 GPIO_ACTIVE_HIGH>;
+		openvfd_chars = [00 04 03 02 01];
+		openvfd_dot_bits = [00 01 03 02 04 05 06];
+		/* OpenVFD packs type/reserved/flags/controller into this word. */
+		openvfd_display_type = <0x06000000>;
 	};
 
 	spdif_dit: spdif-transmitter {
@@ -131,13 +95,29 @@
 		#sound-dai-cells = <0>;
 	};
 
+	vddao_1v8: regulator-vddao-1v8 {
+		compatible = "regulator-fixed";
+		regulator-name = "VDDAO_1V8";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-always-on;
+	};
+
 	sound {
 		compatible = "amlogic,axg-sound-card";
 		model = "HK1 RBOX X4";
-		audio-aux-devs = <&tdmout_c>;
+		audio-widgets = "Line", "Lineout";
+		audio-aux-devs = <&tdmout_c>, <&tdmout_b>;
 		audio-routing = "SPDIFOUT_A IN 0", "FRDDR_A OUT 3",
+				"SPDIFOUT_A IN 1", "FRDDR_B OUT 3",
+				"TDMOUT_B IN 0", "FRDDR_A OUT 1",
+				"TDMOUT_B IN 1", "FRDDR_B OUT 1",
+				"TDMOUT_C IN 0", "FRDDR_A OUT 2",
 				"TDMOUT_C IN 1", "FRDDR_B OUT 2",
-				"TDM_C Playback", "TDMOUT_C OUT";
+				"TDM_B Playback", "TDMOUT_B OUT",
+				"TDM_C Playback", "TDMOUT_C OUT",
+				"Lineout", "ACODEC LOLP",
+				"Lineout", "ACODEC LORP";
 		clocks = <&clkc CLKID_MPLL2>, <&clkc CLKID_MPLL0>,
 			 <&clkc CLKID_MPLL1>;
 		assigned-clocks = <&clkc CLKID_MPLL2>, <&clkc CLKID_MPLL0>,
@@ -155,8 +135,13 @@
 
 		dai-link-2 {
 			sound-dai = <&spdifout_a>;
-			codec {
+
+			codec-0 {
 				sound-dai = <&spdif_dit>;
+			};
+
+			codec-1 {
+				sound-dai = <&tohdmitx TOHDMITX_SPDIF_IN_A>;
 			};
 		};
 
@@ -164,6 +149,9 @@
 			sound-dai = <&tdmif_c>;
 			dai-format = "i2s";
 			dai-tdm-slot-tx-mask-0 = <1 1>;
+			dai-tdm-slot-tx-mask-1 = <1 1>;
+			dai-tdm-slot-tx-mask-2 = <1 1>;
+			dai-tdm-slot-tx-mask-3 = <1 1>;
 			mclk-fs = <256>;
 			codec {
 				sound-dai = <&tohdmitx TOHDMITX_I2S_IN_C>;
@@ -174,6 +162,25 @@
 			sound-dai = <&tohdmitx TOHDMITX_I2S_OUT>;
 			codec {
 				sound-dai = <&hdmi_tx>;
+			};
+		};
+
+		dai-link-5 {
+			sound-dai = <&tdmif_b>;
+			dai-format = "i2s";
+			dai-tdm-slot-tx-mask-0 = <1 1>;
+			mclk-fs = <256>;
+
+			codec {
+				sound-dai = <&toacodec TOACODEC_IN_B>;
+			};
+		};
+
+		dai-link-6 {
+			sound-dai = <&toacodec TOACODEC_OUT>;
+
+			codec {
+				sound-dai = <&acodec>;
 			};
 		};
 	};
@@ -411,6 +418,19 @@
 };
 
 &tdmif_c {
+	status = "okay";
+};
+
+&tdmif_b {
+	status = "okay";
+};
+
+&toacodec {
+	status = "okay";
+};
+
+&acodec {
+	AVDD-supply = <&vddao_1v8>;
 	status = "okay";
 };
 
