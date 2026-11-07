@@ -98,6 +98,7 @@ struct meson_drm {
 		uint32_t osb_blend1_size;
 
 		bool vd1_enabled;
+		bool vd1_interlace;
 		bool vd1_commit;
 		bool vd1_afbc;
 		unsigned int vd1_planes;
@@ -156,7 +157,9 @@ struct meson_drm {
 		uint32_t vpp_vsc_region4_endp;
 		uint32_t vpp_vsc_start_phase_step;
 		uint32_t vpp_vsc_ini_phase;
+		uint32_t vpp_vsc_ini_phase_bottom;
 		uint32_t vpp_vsc_phase_ctrl;
+		uint32_t vpp_vsc_phase_ctrl_bottom;
 		uint32_t vpp_hsc_phase_ctrl;
 		uint32_t vpp_blend_vd2_h_start_end;
 		uint32_t vpp_blend_vd2_v_start_end;

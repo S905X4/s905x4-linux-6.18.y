@@ -19,6 +19,7 @@
 #include <linux/soc/amlogic/meson-canvas.h>
 
 #include <drm/clients/drm_client_setup.h>
+#include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_drv.h>
 #include <drm/drm_fbdev_dma.h>
@@ -66,8 +67,24 @@ static const struct drm_mode_config_funcs meson_mode_config_funcs = {
 	.fb_create           = drm_gem_fb_create,
 };
 
+static void meson_atomic_commit_tail(struct drm_atomic_state *state)
+{
+	struct drm_device *dev = state->dev;
+
+	drm_atomic_helper_commit_modeset_disables(dev, state);
+	drm_atomic_helper_commit_modeset_enables(dev, state);
+	drm_atomic_helper_commit_planes(dev, state,
+				      DRM_PLANE_COMMIT_ACTIVE_ONLY);
+	drm_atomic_helper_fake_vblank(state);
+	drm_atomic_helper_commit_hw_done(state);
+
+	/* The IRQ completes the flip after applying the staged registers. */
+	drm_atomic_helper_wait_for_flip_done(dev, state);
+	drm_atomic_helper_cleanup_planes(dev, state);
+}
+
 static const struct drm_mode_config_helper_funcs meson_mode_config_helpers = {
-	.atomic_commit_tail = drm_atomic_helper_commit_tail_rpm,
+	.atomic_commit_tail = meson_atomic_commit_tail,
 };
 
 static irqreturn_t meson_irq(int irq, void *arg)

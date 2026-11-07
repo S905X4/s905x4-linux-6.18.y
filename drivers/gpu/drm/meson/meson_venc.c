@@ -842,6 +842,8 @@ static struct meson_hdmi_venc_vic_mode {
 	{ 95, &meson_hdmi_encp_mode_2160p30 },
 	{ 96, &meson_hdmi_encp_mode_2160p25 },
 	{ 97, &meson_hdmi_encp_mode_2160p30 },
+	{ 106, &meson_hdmi_encp_mode_2160p25 },
+	{ 107, &meson_hdmi_encp_mode_2160p30 },
 	{ 0, NULL}, /* sentinel */
 };
 
@@ -1498,7 +1500,7 @@ void meson_venc_hdmi_mode_set(struct meson_drm *priv, int vic,
 					- sof_lines
 					- vsync_lines;
 			vs_eline_odd = (de_v_begin_odd - 1)
-					- vsync_lines;
+					- sof_lines;
 			vso_begin_odd  = modulo(hs_begin
 						+ (total_pixels_venc >> 1),
 						total_pixels_venc);

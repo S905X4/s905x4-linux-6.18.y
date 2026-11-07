@@ -150,6 +150,9 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	int hf_bank_len;
 	int vf_bank_len;
 	u8 canvas_id_osd1;
+	u16 global_alpha;
+	bool sc2_interlace = priv->sc2 &&
+		(new_state->crtc->mode.flags & DRM_MODE_FLAG_INTERLACE);
 
 	/*
 	 * Update Coordinates
@@ -167,9 +170,13 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	else
 		priv->viu.osd1_afbcd = false;
 
-	/* Enable OSD and BLK0, set max global alpha */
+	/* Enable OSD and BLK0, set global alpha */
+	global_alpha = new_state->alpha >> 8;
+	if (global_alpha == 0xff)
+		global_alpha = 0x100;
+
 	priv->viu.osd1_ctrl_stat = OSD_ENABLE |
-				   (0x100 << OSD_GLOBAL_ALPHA_SHIFT) |
+				   (global_alpha << OSD_GLOBAL_ALPHA_SHIFT) |
 				   OSD_BLK0_ENABLE;
 
 	priv->viu.osd1_ctrl_stat2 = readl(priv->io_base +
@@ -240,8 +247,11 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 		break;
 	case DRM_FORMAT_ARGB8888:
 	case DRM_FORMAT_ABGR8888:
-		/* For ARGB, use the pixel's alpha */
-		priv->viu.osd1_ctrl_stat2 &= ~OSD_REPLACE_EN;
+		/* For ARGB, respect pixel_blend_mode */
+		if (new_state->pixel_blend_mode == DRM_MODE_BLEND_PIXEL_NONE)
+			priv->viu.osd1_ctrl_stat2 |= OSD_REPLACE_EN;
+		else
+			priv->viu.osd1_ctrl_stat2 &= ~OSD_REPLACE_EN;
 		break;
 	}
 
@@ -287,10 +297,22 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	else
 		bot_ini_phase = 0;
 
+	if (sc2_interlace) {
+		/* Progressive OSD input to top/bottom fields, as on G12B+. */
+		vsc_bot_rcv_num = vf_bank_len;
+		vsc_bot_rpt_p0_num = vsc_ini_rpt_p0_num;
+		bot_ini_phase = vf_phase_step >> 5;
+		/* Upscaling-only checks limit the field scaler ratio to 2:1. */
+		if (bot_ini_phase >= BIT(16)) {
+			vsc_bot_rpt_p0_num--;
+			bot_ini_phase -= BIT(16);
+		}
+	}
+
 	vf_phase_step = (vf_phase_step << 4);
 
 	/* In interlaced mode, scaler is always active */
-	if (src_h != dst_h || src_w != dst_w) {
+	if (sc2_interlace || src_h != dst_h || src_w != dst_w) {
 		priv->viu.osd_sc_i_wh_m1 = SCI_WH_M1_W(src_w - 1) |
 					   SCI_WH_M1_H(src_h - 1);
 		priv->viu.osd_sc_o_h_start_end = SCO_HV_START(dest.x1) |
@@ -307,7 +329,7 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	}
 
 	/* In interlaced mode, vertical scaler is always active */
-	if (src_h != dst_h) {
+	if (sc2_interlace || src_h != dst_h) {
 		priv->viu.osd_sc_v_ctrl0 =
 					VSC_BANK_LEN(vf_bank_len) |
 					VSC_TOP_INI_RCV_NUM(vsc_ini_rcv_num) |
@@ -320,8 +342,16 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 					VSC_BOT_RPT_L0_NUM(vsc_bot_rpt_p0_num) |
 					VSC_PROG_INTERLACE;
 
+		if (sc2_interlace)
+			/* G12B+ vendor setting for progressive-to-field scaling. */
+			priv->viu.osd_sc_v_ctrl0 |= BIT(25);
+
 		priv->viu.osd_sc_v_phase_step = SC_PHASE_STEP(vf_phase_step);
 		priv->viu.osd_sc_v_ini_phase = VSC_INI_PHASE_BOT(bot_ini_phase);
+		if (sc2_interlace && src_h == dst_h * 2)
+			priv->viu.osd_sc_v_ini_phase |=
+				VSC_INI_PHASE_TOP(0x8000) |
+				VSC_INI_PHASE_BOT(0x8000);
 	} else {
 		priv->viu.osd_sc_v_ctrl0 = 0;
 		priv->viu.osd_sc_v_phase_step = 0;
@@ -357,11 +387,28 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	priv->viu.osd1_blk0_cfg[3] = ((dest.x2 - 1) << 16) | dest.x1;
 	priv->viu.osd1_blk0_cfg[4] = ((dest.y2 - 1) << 16) | dest.y1;
 
+	if (priv->sc2) {
+		/*
+		 * OSD memory scanout and the OSD blender precede the shared
+		 * scaler. They consume a progressive frame, not a 540-line
+		 * field; only the scaler output and VPP use field coordinates.
+		 */
+		priv->viu.osd1_blk0_cfg[3] = (src_w - 1) << 16;
+		priv->viu.osd1_blk0_cfg[4] = (src_h - 1) << 16;
+	}
+
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
 		priv->viu.osd_blend_din0_scope_h = ((dest.x2 - 1) << 16) | dest.x1;
 		priv->viu.osd_blend_din0_scope_v = ((dest.y2 - 1) << 16) | dest.y1;
 		priv->viu.osb_blend0_size = dst_h << 16 | dst_w;
 		priv->viu.osb_blend1_size = dst_h << 16 | dst_w;
+
+		if (priv->sc2) {
+			priv->viu.osd_blend_din0_scope_h = (src_w - 1) << 16;
+			priv->viu.osd_blend_din0_scope_v = (src_h - 1) << 16;
+			priv->viu.osb_blend0_size = src_h << 16 | src_w;
+			priv->viu.osb_blend1_size = src_h << 16 | src_w;
+		}
 	}
 
 	/* Update Canvas with buffer address */
@@ -401,22 +448,12 @@ static void meson_plane_atomic_disable(struct drm_plane *plane,
 {
 	struct meson_plane *meson_plane = to_meson_plane(plane);
 	struct meson_drm *priv = meson_plane->priv;
+	unsigned long flags;
 
-	if (priv->afbcd.ops) {
-		priv->afbcd.ops->reset(priv);
-		priv->afbcd.ops->disable(priv);
-	}
-
-	/* Disable OSD1 */
-	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A))
-		writel_bits_relaxed(VIU_OSD1_POSTBLD_SRC_OSD1, 0,
-				    priv->io_base + _REG(OSD1_BLEND_SRC_CTRL));
-	else
-		writel_bits_relaxed(VPP_OSD1_POSTBLEND, 0,
-				    priv->io_base + _REG(VPP_MISC));
-
+	spin_lock_irqsave(&priv->drm->event_lock, flags);
 	meson_plane->enabled = false;
 	priv->viu.osd1_enabled = false;
+	spin_unlock_irqrestore(&priv->drm->event_lock, flags);
 }
 
 static const struct drm_plane_helper_funcs meson_plane_helper_funcs = {
@@ -562,8 +599,13 @@ int meson_plane_create(struct meson_drm *priv)
 
 	drm_plane_helper_add(plane, &meson_plane_helper_funcs);
 
-	/* For now, OSD Primary plane is always on the front */
-	drm_plane_create_zpos_immutable_property(plane, 1);
+	/* Default zpos: OSD Primary plane is on the front */
+	drm_plane_create_zpos_property(plane, 1, 0, 255);
+	drm_plane_create_alpha_property(plane);
+	drm_plane_create_blend_mode_property(plane,
+					     BIT(DRM_MODE_BLEND_PREMULTI) |
+					     BIT(DRM_MODE_BLEND_COVERAGE) |
+					     BIT(DRM_MODE_BLEND_PIXEL_NONE));
 
 	priv->primary_plane = plane;
 

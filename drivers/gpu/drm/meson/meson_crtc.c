@@ -12,6 +12,7 @@
 #include <linux/bitfield.h>
 #include <linux/soc/amlogic/meson-canvas.h>
 
+#include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_device.h>
 #include <drm/drm_print.h>
@@ -38,7 +39,10 @@ struct meson_crtc {
 	void (*enable_osd1_afbc)(struct meson_drm *priv);
 	void (*disable_osd1_afbc)(struct meson_drm *priv);
 	bool vsync_forced;
-	bool vsync_disabled;
+	bool osd1_afbcd;
+	bool vd1_interlace;
+	u32 vd1_vsc_ini_phase[2];
+	u32 vd1_vsc_phase_ctrl[2];
 };
 #define to_meson_crtc(x) container_of(x, struct meson_crtc, base)
 
@@ -49,7 +53,6 @@ static int meson_crtc_enable_vblank(struct drm_crtc *crtc)
 	struct meson_crtc *meson_crtc = to_meson_crtc(crtc);
 	struct meson_drm *priv = meson_crtc->priv;
 
-	meson_crtc->vsync_disabled = false;
 	meson_venc_enable_vsync(priv);
 
 	return 0;
@@ -60,10 +63,8 @@ static void meson_crtc_disable_vblank(struct drm_crtc *crtc)
 	struct meson_crtc *meson_crtc = to_meson_crtc(crtc);
 	struct meson_drm *priv = meson_crtc->priv;
 
-	if (!meson_crtc->vsync_forced) {
-		meson_crtc->vsync_disabled = true;
+	if (!meson_crtc->vsync_forced)
 		meson_venc_disable_vsync(priv);
-	}
 }
 
 static const struct drm_crtc_funcs meson_crtc_funcs = {
@@ -84,6 +85,7 @@ static void meson_g12a_crtc_atomic_enable(struct drm_crtc *crtc,
 	struct meson_crtc *meson_crtc = to_meson_crtc(crtc);
 	struct drm_crtc_state *crtc_state = crtc->state;
 	struct meson_drm *priv = meson_crtc->priv;
+	unsigned int vdisplay;
 
 	DRM_DEBUG_DRIVER("\n");
 
@@ -92,23 +94,27 @@ static void meson_g12a_crtc_atomic_enable(struct drm_crtc *crtc,
 		return;
 	}
 
+	vdisplay = crtc_state->mode.vdisplay;
+	if (crtc_state->mode.flags & DRM_MODE_FLAG_INTERLACE)
+		vdisplay /= 2;
+
 	/* VD1 Preblend vertical start/end */
 	writel(FIELD_PREP(GENMASK(11, 0), 2303),
 	       priv->io_base + _REG(VPP_PREBLEND_VD1_V_START_END));
 
 	/* Setup Blender */
 	writel(crtc_state->mode.hdisplay |
-	       crtc_state->mode.vdisplay << 16,
+	       vdisplay << 16,
 	       priv->io_base + _REG(VPP_POSTBLEND_H_SIZE));
 
 	writel_relaxed(0 << 16 |
 			(crtc_state->mode.hdisplay - 1),
 			priv->io_base + _REG(VPP_OSD1_BLD_H_SCOPE));
 	writel_relaxed(0 << 16 |
-			(crtc_state->mode.vdisplay - 1),
+			(vdisplay - 1),
 			priv->io_base + _REG(VPP_OSD1_BLD_V_SCOPE));
 	writel_relaxed(crtc_state->mode.hdisplay << 16 |
-			crtc_state->mode.vdisplay,
+			vdisplay,
 			priv->io_base + _REG(VPP_OUT_H_V_SIZE));
 
 	drm_crtc_vblank_on(crtc);
@@ -142,29 +148,52 @@ static void meson_crtc_atomic_enable(struct drm_crtc *crtc,
 	drm_crtc_vblank_on(crtc);
 }
 
-static void meson_g12a_crtc_atomic_disable(struct drm_crtc *crtc,
-					   struct drm_atomic_state *state)
+static void meson_crtc_disable_osd1(struct meson_crtc *meson_crtc)
 {
-	struct meson_crtc *meson_crtc = to_meson_crtc(crtc);
 	struct meson_drm *priv = meson_crtc->priv;
 
-	DRM_DEBUG_DRIVER("\n");
+	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A))
+		writel_bits_relaxed(VIU_OSD1_POSTBLD_SRC_OSD1, 0,
+				    priv->io_base + _REG(OSD1_BLEND_SRC_CTRL));
+	else
+		writel_bits_relaxed(VPP_OSD1_POSTBLEND, 0,
+				    priv->io_base + _REG(VPP_MISC));
 
-	drm_crtc_vblank_off(crtc);
+	writel_bits_relaxed(OSD_ENABLE | OSD_BLK0_ENABLE, 0,
+			    priv->io_base + _REG(VIU_OSD1_CTRL_STAT));
 
-	priv->viu.osd1_enabled = false;
-	priv->viu.osd1_commit = false;
-
-	priv->viu.vd1_enabled = false;
-	priv->viu.vd1_commit = false;
-
-	if (crtc->state->event && !crtc->state->active) {
-		spin_lock_irq(&crtc->dev->event_lock);
-		drm_crtc_send_vblank_event(crtc, crtc->state->event);
-		spin_unlock_irq(&crtc->dev->event_lock);
-
-		crtc->state->event = NULL;
+	if (meson_crtc->osd1_afbcd) {
+		if (meson_crtc->disable_osd1_afbc)
+			meson_crtc->disable_osd1_afbc(priv);
+		priv->afbcd.ops->reset(priv);
+		priv->afbcd.ops->disable(priv);
+		meson_crtc->osd1_afbcd = false;
 	}
+}
+
+static void meson_crtc_disable_vd1(struct meson_crtc *meson_crtc)
+{
+	struct meson_drm *priv = meson_crtc->priv;
+
+	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
+		writel_relaxed(0, priv->io_base + _REG(VD1_BLEND_SRC_CTRL));
+		writel_relaxed(0, priv->io_base + _REG(VD2_BLEND_SRC_CTRL));
+		writel_relaxed(0, priv->io_base +
+			       _REG(meson_viu_mif_reg(priv, VD1_IF0_GEN_REG)));
+		writel_relaxed(0, priv->io_base +
+			       _REG(meson_viu_mif_reg(priv, VD2_IF0_GEN_REG)));
+	} else {
+		writel_bits_relaxed(VPP_VD1_POSTBLEND | VPP_VD1_PREBLEND, 0,
+				    priv->io_base + _REG(VPP_MISC));
+	}
+
+	if (priv->sc2) {
+		writel_relaxed(0, priv->io_base +
+			       _REG(meson_viu_afbc_reg(priv, AFBC_ENABLE)));
+		meson_viu_vd1_afbc_select(priv, false);
+	}
+
+	meson_crtc->vd1_interlace = false;
 }
 
 static void meson_crtc_atomic_disable(struct drm_crtc *crtc,
@@ -177,40 +206,25 @@ static void meson_crtc_atomic_disable(struct drm_crtc *crtc,
 
 	drm_crtc_vblank_off(crtc);
 
+	spin_lock_irq(&crtc->dev->event_lock);
 	priv->viu.osd1_enabled = false;
 	priv->viu.osd1_commit = false;
-
 	priv->viu.vd1_enabled = false;
 	priv->viu.vd1_commit = false;
+	meson_crtc_disable_osd1(meson_crtc);
+	meson_crtc_disable_vd1(meson_crtc);
+	meson_crtc->vsync_forced = false;
+	meson_venc_disable_vsync(priv);
 
-	/* Disable VPP Postblend */
-	writel_bits_relaxed(VPP_OSD1_POSTBLEND | VPP_VD1_POSTBLEND |
-			    VPP_VD1_PREBLEND | VPP_POSTBLEND_ENABLE, 0,
-			    priv->io_base + _REG(VPP_MISC));
+	if (!meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A))
+		writel_bits_relaxed(VPP_POSTBLEND_ENABLE, 0,
+				    priv->io_base + _REG(VPP_MISC));
 
 	if (crtc->state->event && !crtc->state->active) {
-		spin_lock_irq(&crtc->dev->event_lock);
 		drm_crtc_send_vblank_event(crtc, crtc->state->event);
-		spin_unlock_irq(&crtc->dev->event_lock);
-
 		crtc->state->event = NULL;
 	}
-}
-
-static void meson_crtc_atomic_begin(struct drm_crtc *crtc,
-				    struct drm_atomic_state *state)
-{
-	struct meson_crtc *meson_crtc = to_meson_crtc(crtc);
-	unsigned long flags;
-
-	if (crtc->state->event) {
-		WARN_ON(drm_crtc_vblank_get(crtc) != 0);
-
-		spin_lock_irqsave(&crtc->dev->event_lock, flags);
-		meson_crtc->event = crtc->state->event;
-		spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
-		crtc->state->event = NULL;
-	}
+	spin_unlock_irq(&crtc->dev->event_lock);
 }
 
 static void meson_crtc_atomic_flush(struct drm_crtc *crtc,
@@ -218,23 +232,40 @@ static void meson_crtc_atomic_flush(struct drm_crtc *crtc,
 {
 	struct meson_crtc *meson_crtc = to_meson_crtc(crtc);
 	struct meson_drm *priv = meson_crtc->priv;
+	struct drm_crtc_state *crtc_state =
+		drm_atomic_get_new_crtc_state(state, crtc);
+	unsigned long flags;
 
-	priv->viu.osd1_commit = true;
-	priv->viu.vd1_commit = true;
+	if (crtc_state->event)
+		WARN_ON(drm_crtc_vblank_get(crtc) != 0);
+
+	/*
+	 * Publish the completed shadows and their event together. The atomic
+	 * helpers wait for the previous flip before either plane can update its
+	 * shadow, so the IRQ must not signal this flip before atomic_flush.
+	 */
+	spin_lock_irqsave(&crtc->dev->event_lock, flags);
+	if (drm_atomic_get_new_plane_state(state, priv->primary_plane))
+		priv->viu.osd1_commit = true;
+	if (drm_atomic_get_new_plane_state(state, priv->overlay_plane))
+		priv->viu.vd1_commit = true;
+	if (crtc_state->event) {
+		meson_crtc->event = crtc_state->event;
+		crtc_state->event = NULL;
+	}
+	spin_unlock_irqrestore(&crtc->dev->event_lock, flags);
 }
 
 static const struct drm_crtc_helper_funcs meson_crtc_helper_funcs = {
-	.atomic_begin	= meson_crtc_atomic_begin,
 	.atomic_flush	= meson_crtc_atomic_flush,
 	.atomic_enable	= meson_crtc_atomic_enable,
 	.atomic_disable	= meson_crtc_atomic_disable,
 };
 
 static const struct drm_crtc_helper_funcs meson_g12a_crtc_helper_funcs = {
-	.atomic_begin	= meson_crtc_atomic_begin,
 	.atomic_flush	= meson_crtc_atomic_flush,
 	.atomic_enable	= meson_g12a_crtc_atomic_enable,
-	.atomic_disable	= meson_g12a_crtc_atomic_disable,
+	.atomic_disable	= meson_crtc_atomic_disable,
 };
 
 static void meson_crtc_enable_osd1(struct meson_drm *priv)
@@ -310,6 +341,14 @@ void meson_crtc_irq(struct meson_drm *priv)
 	struct meson_crtc *meson_crtc = to_meson_crtc(priv->crtc);
 	unsigned long flags;
 
+	drm_crtc_handle_vblank(priv->crtc);
+
+	spin_lock_irqsave(&priv->drm->event_lock, flags);
+	if (priv->viu.osd1_commit && !priv->viu.osd1_enabled) {
+		meson_crtc_disable_osd1(meson_crtc);
+		priv->viu.osd1_commit = false;
+	}
+
 	/* Update the OSD registers */
 	if (priv->viu.osd1_enabled && priv->viu.osd1_commit) {
 		writel_relaxed(priv->viu.osd1_ctrl_stat,
@@ -330,14 +369,11 @@ void meson_crtc_irq(struct meson_drm *priv)
 		if (priv->viu.osd1_afbcd) {
 			if (meson_crtc->enable_osd1_afbc)
 				meson_crtc->enable_osd1_afbc(priv);
-		} else {
+		} else if (meson_crtc->osd1_afbcd) {
 			if (meson_crtc->disable_osd1_afbc)
 				meson_crtc->disable_osd1_afbc(priv);
-			if (priv->afbcd.ops) {
-				priv->afbcd.ops->reset(priv);
-				priv->afbcd.ops->disable(priv);
-			}
-			meson_crtc->vsync_forced = false;
+			priv->afbcd.ops->reset(priv);
+			priv->afbcd.ops->disable(priv);
 		}
 
 		writel_relaxed(priv->viu.osd_sc_ctrl0,
@@ -374,13 +410,21 @@ void meson_crtc_irq(struct meson_drm *priv)
 			meson_crtc->enable_osd1(priv);
 
 		if (priv->viu.osd1_afbcd) {
-			priv->afbcd.ops->reset(priv);
+			/* SC2 does not need the G12A per-frame reset workaround. */
+			if (!priv->sc2 || !meson_crtc->osd1_afbcd)
+				priv->afbcd.ops->reset(priv);
 			priv->afbcd.ops->setup(priv);
 			priv->afbcd.ops->enable(priv);
-			meson_crtc->vsync_forced = true;
 		}
 
+		meson_crtc->osd1_afbcd = priv->viu.osd1_afbcd;
+
 		priv->viu.osd1_commit = false;
+	}
+
+	if (priv->viu.vd1_commit && !priv->viu.vd1_enabled) {
+		meson_crtc_disable_vd1(meson_crtc);
+		priv->viu.vd1_commit = false;
 	}
 
 	/* Update the VD1 registers */
@@ -652,12 +696,24 @@ void meson_crtc_irq(struct meson_drm *priv)
 				priv->io_base + _REG(VPP_VSC_REGION4_ENDP));
 		writel_relaxed(priv->viu.vpp_vsc_start_phase_step,
 				priv->io_base + _REG(VPP_VSC_START_PHASE_STEP));
-		writel_relaxed(priv->viu.vpp_vsc_ini_phase,
-				priv->io_base + _REG(VPP_VSC_INI_PHASE));
-		writel_relaxed(priv->viu.vpp_vsc_phase_ctrl,
-				priv->io_base + _REG(VPP_VSC_PHASE_CTRL));
+		meson_crtc->vd1_interlace = priv->viu.vd1_interlace;
+		meson_crtc->vd1_vsc_ini_phase[0] = priv->viu.vpp_vsc_ini_phase;
+		meson_crtc->vd1_vsc_ini_phase[1] =
+			priv->viu.vpp_vsc_ini_phase_bottom;
+		meson_crtc->vd1_vsc_phase_ctrl[0] = priv->viu.vpp_vsc_phase_ctrl;
+		meson_crtc->vd1_vsc_phase_ctrl[1] =
+			priv->viu.vpp_vsc_phase_ctrl_bottom;
+		if (!meson_crtc->vd1_interlace) {
+			writel_relaxed(meson_crtc->vd1_vsc_ini_phase[0],
+				       priv->io_base + _REG(VPP_VSC_INI_PHASE));
+			writel_relaxed(meson_crtc->vd1_vsc_phase_ctrl[0],
+				       priv->io_base + _REG(VPP_VSC_PHASE_CTRL));
+		}
 		writel_relaxed(priv->viu.vpp_hsc_phase_ctrl,
 				priv->io_base + _REG(VPP_HSC_PHASE_CTRL));
+		if (priv->sc2)
+			writel_relaxed(priv->viu.vpp_hsc_phase_ctrl,
+				       priv->io_base + _REG(VPP_HSC_PHASE_CTRL1));
 		writel_relaxed(0x42, priv->io_base + _REG(VPP_SCALE_COEF_IDX));
 
 		/* Enable VD1 */
@@ -667,12 +723,26 @@ void meson_crtc_irq(struct meson_drm *priv)
 		priv->viu.vd1_commit = false;
 	}
 
-	if (meson_crtc->vsync_disabled)
-		return;
+	/* Use only applied phases: the plane shadows may hold an unflushed flip. */
+	if (meson_crtc->vd1_interlace) {
+		bool bottom;
 
-	drm_crtc_handle_vblank(priv->crtc);
+		if (priv->venc.current_mode == MESON_VENC_MODE_HDMI &&
+		    !priv->venc.hdmi_use_enci)
+			bottom = FIELD_GET(GENMASK(28, 16),
+				readl_relaxed(priv->io_base + _REG(ENCP_INFO_READ))) >= 562;
+		else
+			bottom = meson_venci_get_field(priv);
 
-	spin_lock_irqsave(&priv->drm->event_lock, flags);
+		/* These are CPU writes for the current field, not next-vsync RDMA. */
+		writel_relaxed(meson_crtc->vd1_vsc_ini_phase[bottom],
+			       priv->io_base + _REG(VPP_VSC_INI_PHASE));
+		writel_relaxed(meson_crtc->vd1_vsc_phase_ctrl[bottom],
+			       priv->io_base + _REG(VPP_VSC_PHASE_CTRL));
+	}
+
+	meson_crtc->vsync_forced = meson_crtc->osd1_afbcd ||
+				   meson_crtc->vd1_interlace;
 	if (meson_crtc->event) {
 		drm_crtc_send_vblank_event(priv->crtc, meson_crtc->event);
 		drm_crtc_vblank_put(priv->crtc);
