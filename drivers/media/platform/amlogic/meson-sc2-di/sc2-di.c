@@ -325,7 +325,7 @@ static void di_run(void *priv)
 	struct sc2_di_ctx *ctx = priv;
 
 	WRITE_ONCE(ctx->di->active, ctx);
-	queue_work(system_long_wq, &ctx->di->work);
+	queue_work(system_highpri_wq, &ctx->di->work);
 }
 
 static void di_abort(void *priv)
@@ -366,6 +366,9 @@ static int di_queue_setup(struct vb2_queue *vq, unsigned int *nbufs,
 
 	if (READ_ONCE(ctx->di->fatal) || READ_ONCE(ctx->di->removing))
 		return -EIO;
+	if (V4L2_TYPE_IS_CAPTURE(vq->type))
+		*nbufs = max_t(unsigned int, *nbufs, 16);
+
 
 	if (*nplanes) {
 		if (*nplanes != 2)

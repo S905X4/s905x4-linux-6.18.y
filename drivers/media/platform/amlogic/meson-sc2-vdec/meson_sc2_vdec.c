@@ -333,6 +333,9 @@ static int sc2_queue_setup(struct vb2_queue *q, unsigned int *count,
 {
 	struct sc2_ctx *ctx = vb2_get_drv_priv(q);
 	u32 size = sc2_format(ctx, q->type)->plane_fmt[0].sizeimage;
+	if (V4L2_TYPE_IS_CAPTURE(q->type))
+		*count = max_t(unsigned int, *count, 16);
+
 
 	if (*planes)
 		return *planes == 1 && sizes[0] >= size ? 0 : -EINVAL;
