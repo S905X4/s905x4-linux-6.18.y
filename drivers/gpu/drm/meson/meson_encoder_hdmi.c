@@ -131,6 +131,7 @@ static enum drm_mode_status meson_encoder_hdmi_mode_valid(struct drm_bridge *bri
 	unsigned long long hdmi_freq;
 	int vic = drm_match_cea_mode(mode);
 	enum drm_mode_status status;
+	bool is_420 = false;
 
 	dev_dbg(priv->dev, "Modeline " DRM_MODE_FMT "\n", DRM_MODE_ARG(mode));
 
@@ -154,10 +155,14 @@ static enum drm_mode_status meson_encoder_hdmi_mode_valid(struct drm_bridge *bri
 
 	vclk_freq = clock;
 
+	is_420 = drm_mode_is_420_only(display_info, mode) ||
+		 (!is_hdmi2_sink && drm_mode_is_420_also(display_info, mode)) ||
+		 (display_info->max_tmds_clock &&
+		  mode->clock > display_info->max_tmds_clock &&
+		  drm_mode_is_420_also(display_info, mode));
+
 	/* For 420, pixel clock is half unlike venc clock */
-	if (drm_mode_is_420_only(display_info, mode) ||
-	    (!is_hdmi2_sink &&
-	     drm_mode_is_420_also(display_info, mode)))
+	if (is_420)
 		vclk_freq /= 2;
 
 	/* TMDS clock is pixel_clock * 10 */
@@ -171,10 +176,7 @@ static enum drm_mode_status meson_encoder_hdmi_mode_valid(struct drm_bridge *bri
 	hdmi_freq = vclk_freq;
 
 	/* VENC double pixels for 1080i, 720p and YUV420 modes */
-	if (meson_venc_hdmi_venc_repeat(vic) ||
-	    drm_mode_is_420_only(display_info, mode) ||
-	    (!is_hdmi2_sink &&
-	     drm_mode_is_420_also(display_info, mode)))
+	if (meson_venc_hdmi_venc_repeat(vic) || is_420)
 		venc_freq *= 2;
 
 	vclk_freq = max(venc_freq, hdmi_freq);
@@ -186,7 +188,13 @@ static enum drm_mode_status meson_encoder_hdmi_mode_valid(struct drm_bridge *bri
 		"%s: vclk:%lluHz phy=%lluHz venc=%lluHz hdmi=%lluHz\n",
 		__func__, phy_freq, vclk_freq, venc_freq, hdmi_freq);
 
-	return meson_vclk_vic_supported_freq(priv, phy_freq, vclk_freq);
+	status = meson_vclk_vic_supported_freq(priv, phy_freq, vclk_freq);
+	if (status != MODE_OK && drm_mode_is_420_also(display_info, mode) && !is_420) {
+		/* Fallback: try YUV420 clock if RGB clock is not supported */
+		status = meson_vclk_vic_supported_freq(priv, phy_freq / 2, vclk_freq);
+	}
+
+	return status;
 }
 
 static void meson_encoder_hdmi_atomic_enable(struct drm_bridge *bridge,
