@@ -5084,6 +5084,12 @@ static irqreturn_t h264_multi_threaded_isr(struct amvdec_session *sess)
             ret = h264_multi_run(sess);
         break;
     }
+    /* Stream mode can exhaust its bit budget while the producer advances WP.
+     * DATA_REQUEST is starvation, not a completed picture or a frame-based
+     * chunk handoff. Keep the last completed input checkpoint and all tokens;
+     * replay unfinished input only after more bytes have been committed.
+     */
+    case H264_DATA_REQUEST:
     case H264_SEARCH_BUFEMPTY:
     case H264_DECODE_BUFEMPTY: {
         struct StorablePicture *pic = dpb->mVideo.dec_picture;
@@ -5219,10 +5225,12 @@ static int codec_h264_drain_step(struct amvdec_session *sess)
     if (m->running || m->waiting_capture || m->waiting_surface ||
         !m->empty || m->job_end != m->committed_offset)
         goto unlock;
-    /* SEARCH_BUFEMPTY plus the completed-picture ledger is real drain.
+    /* Search starvation plus the completed-picture ledger is real drain.
      * No timeout, cached ANC surface, or missing field becomes a picture.
      */
-    if (m->incomplete || m->empty_status != H264_SEARCH_BUFEMPTY) {
+    if (m->incomplete ||
+        (m->empty_status != H264_SEARCH_BUFEMPTY &&
+         m->empty_status != H264_DATA_REQUEST)) {
         ret = -EILSEQ;
         goto unlock;
     }
