@@ -367,8 +367,7 @@ static int di_queue_setup(struct vb2_queue *vq, unsigned int *nbufs,
 	if (READ_ONCE(ctx->di->fatal) || READ_ONCE(ctx->di->removing))
 		return -EIO;
 	if (V4L2_TYPE_IS_CAPTURE(vq->type))
-		*nbufs = max_t(unsigned int, *nbufs, 16);
-
+		*nbufs = clamp_t(unsigned int, *nbufs, 4, 16);
 
 	if (*nplanes) {
 		if (*nplanes != 2)
