@@ -5025,7 +5025,6 @@ static irqreturn_t h264_multi_threaded_isr(struct amvdec_session *sess)
         }
         ret = meson_h264_dpb_h264_slice_header_process(dpb, &gap);
         if (ret < 0 || dpb->dpb_error_flag ||
-            (gap && !dpb->mSPS.frame_num_gap_allowed) ||
             dpb->mSlice.slice_type >= NUM_SLICE_TYPES) {
             dev_err(core->dev, "H264 MULTI DPB failed: ret=%d error=%d gap=%d allowed=%d type=%d\n",
                     ret, dpb->dpb_error_flag, gap,
