@@ -1550,6 +1550,8 @@ void meson_venc_hdmi_mode_set(struct meson_drm *priv, int vic,
 	 */
 	if (hdmi_repeat)
 		reg |= VPU_HDMI_RD_RATE(2);
+	if (priv->sc2)
+		reg |= BIT(20);
 
 	writel_relaxed(reg, priv->io_base + _REG(VPU_HDMI_SETTING));
 
