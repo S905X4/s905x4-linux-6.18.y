@@ -538,9 +538,6 @@ static int dw_hdmi_phy_init(struct dw_hdmi *hdmi, void *data,
 		writel_bits_relaxed(0x3, MESON_VENC_SOURCE_ENCP,
 				    priv->io_base + _REG(VPU_HDMI_SETTING));
 
-	if (priv->sc2)
-		writel_bits_relaxed(BIT(20), BIT(20),
-				    priv->io_base + _REG(VPU_HDMI_SETTING));
 	return 0;
 }
 
