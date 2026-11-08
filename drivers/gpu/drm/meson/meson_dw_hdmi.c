@@ -749,6 +749,23 @@ static int meson_enable_clk(struct device *dev, char *name)
 	return ret;
 }
 
+static enum drm_mode_status
+meson_dw_hdmi_mode_valid(struct dw_hdmi *hdmi, void *data,
+			 const struct drm_display_info *info,
+			 const struct drm_display_mode *mode)
+{
+	bool is_hdmi2_sink = info->hdmi.scdc.supported;
+
+	/* If sink has max_tmds_clock, reject modes exceeding bandwidth unless 420 is supported */
+	if (info->max_tmds_clock && mode->clock > info->max_tmds_clock) {
+		if (!drm_mode_is_420_only(info, mode) &&
+		    !(is_hdmi2_sink && drm_mode_is_420_also(info, mode)))
+			return MODE_CLOCK_HIGH;
+	}
+
+	return MODE_OK;
+}
+
 static int meson_dw_hdmi_bind(struct device *dev, struct device *master,
 				void *data)
 {
@@ -863,7 +880,7 @@ static int meson_dw_hdmi_bind(struct device *dev, struct device *master,
 	dw_plat_data->ycbcr_420_allowed = true;
 	dw_plat_data->disable_cec = true;
 	dw_plat_data->output_port = 1;
-
+	dw_plat_data->mode_valid = meson_dw_hdmi_mode_valid;
 	if (dw_hdmi_is_compatible(meson_dw_hdmi, "amlogic,meson-gxl-dw-hdmi") ||
 	    dw_hdmi_is_compatible(meson_dw_hdmi, "amlogic,meson-gxm-dw-hdmi") ||
 	    dw_hdmi_is_compatible(meson_dw_hdmi, "amlogic,meson-g12a-dw-hdmi") ||
