@@ -134,13 +134,12 @@ static enum drm_mode_status meson_encoder_hdmi_mode_valid(struct drm_bridge *bri
 
 	dev_dbg(priv->dev, "Modeline " DRM_MODE_FMT "\n", DRM_MODE_ARG(mode));
 
-	/* If sink does not support 540MHz, reject the non-420 HDMI2 modes */
+	/* If sink does not support high clock, reject non-420 or non-HDMI2 modes */
 	if (display_info->max_tmds_clock &&
 	    mode->clock > display_info->max_tmds_clock &&
 	    !drm_mode_is_420_only(display_info, mode) &&
-	    !drm_mode_is_420_also(display_info, mode))
-		return MODE_BAD;
-
+	    !(is_hdmi2_sink && drm_mode_is_420_also(display_info, mode)))
+		return MODE_CLOCK_HIGH;
 	/* Check against non-VIC supported modes */
 	if (!vic) {
 		status = meson_venc_hdmi_supported_mode(mode);
