@@ -18,8 +18,6 @@
 
 #include <drm/bridge/dw_hdmi.h>
 #include <drm/drm_atomic_helper.h>
-#include <drm/display/drm_scdc_helper.h>
-#include <drm/drm_connector.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_device.h>
 #include <drm/drm_edid.h>
@@ -334,17 +332,13 @@ static void meson_hdmi_phy_setup_mode(struct meson_dw_hdmi *dw_hdmi,
 	if (priv->sc2) {
 		/* Amlogic hw_sc2.c: program drive strength after PHY reset. */
 		u32 ctrl0 = 0x33eb4252;
-		u32 ctrl5 = 0x3;
 
-		if (pixel_clock >= 371250) {
+		if (pixel_clock >= 371250)
 			ctrl0 = 0x37eb65c4;
-			ctrl5 = 0x80b;
-		} else if (pixel_clock >= 250000 || (mode_is_420 && pixel_clock >= 200000)) {
-			/* 3Gbps PHY mode (2.97Gbps: 4K30, 4K24, 4K60/50 YUV420) */
+		else if (pixel_clock >= 297000)
 			ctrl0 = 0x33eb42a2;
-			ctrl5 = 0x3;
-		}
-		meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL5, ctrl5);
+		meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL5,
+				     pixel_clock >= 371250 ? 0x80b : 3);
 		meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL0, ctrl0);
 		meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL3, 0x2ab0ff3b);
 		return;
@@ -440,8 +434,6 @@ static int dw_hdmi_phy_init(struct dw_hdmi *hdmi, void *data,
 
 	if (drm_mode_is_420_only(display, mode) ||
 	    (!is_hdmi2_sink && drm_mode_is_420_also(display, mode)) ||
-	    (display->max_tmds_clock && mode->clock > display->max_tmds_clock &&
-	     drm_mode_is_420_also(display, mode)) ||
 	    dw_hdmi_bus_fmt_is_420(hdmi))
 		mode_is_420 = true;
 
@@ -471,32 +463,6 @@ static int dw_hdmi_phy_init(struct dw_hdmi *hdmi, void *data,
 	meson_hdmi_phy_update_bits(priv, HHI_HDMI_PHY_CNTL1, 0xf, 0);
 
 	dw_hdmi_set_high_tmds_clock_ratio(hdmi, display);
-
-	if (is_hdmi2_sink) {
-		struct drm_connector *connector = NULL, *conn;
-		struct drm_connector_list_iter conn_iter;
-
-		drm_connector_list_iter_begin(priv->drm, &conn_iter);
-		drm_for_each_connector_iter(conn, &conn_iter) {
-			if (conn->connector_type == DRM_MODE_CONNECTOR_HDMIA) {
-				connector = conn;
-				drm_connector_get(connector);
-				break;
-			}
-		}
-		drm_connector_list_iter_end(&conn_iter);
-
-		if (connector) {
-			if (mode->clock > 340000 && !mode_is_420) {
-				drm_scdc_set_high_tmds_clock_ratio(connector, true);
-				drm_scdc_set_scrambling(connector, true);
-			} else {
-				drm_scdc_set_scrambling(connector, false);
-				drm_scdc_set_high_tmds_clock_ratio(connector, false);
-			}
-			drm_connector_put(connector);
-		}
-	}
 
 	msleep(100);
 

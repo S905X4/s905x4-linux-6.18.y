@@ -518,15 +518,11 @@ static void meson_sc2_hdmi_pll_set(struct meson_drm *priv, unsigned int m,
 	bool high = m >= 0xf7;
 
 	priv->hdmi_pll_locked = false;
-	for (attempt = 0; attempt < (high ? 3 : 2); attempt++) {
+	for (attempt = 0; attempt < (high ? 3 : 1); attempt++) {
 		ctrl3 = 0x4a691c00;
 		ctrl4 = 0x33771290;
 		ctrl5 = 0x39270008;
 		ctrl6 = 0x50540000;
-		if (frac != 0 && !high) {
-			/* Enable Sigma-Delta noise cancellation for fractional clocks */
-			ctrl3 |= BIT(15);
-		}
 		if (high) {
 			ctrl3 = frac == 0x8148 ? 0x6a685c00 : 0x6a68dc00;
 			ctrl4 = frac == 0x8148 ? 0x44331290 : 0x65771290;
@@ -550,8 +546,8 @@ static void meson_sc2_hdmi_pll_set(struct meson_drm *priv, unsigned int m,
 		regmap_write(priv->analog, 0x1d4, ctrl5);
 		regmap_write(priv->analog, 0x1d8, ctrl6);
 		regmap_update_bits(priv->analog, 0x1c0, BIT(29), 0);
-		for (retry = 0; retry < 50; retry++) {
-			usleep_range(100, 150);
+		for (retry = 0; retry < 10; retry++) {
+			usleep_range(50, 60);
 			regmap_read(priv->analog, 0x1c0, &val);
 			if ((val & GENMASK(31, 30)) == GENMASK(31, 30)) {
 				priv->hdmi_pll_locked = true;
