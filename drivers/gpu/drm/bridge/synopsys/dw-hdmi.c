@@ -1862,37 +1862,6 @@ static void hdmi_config_AVI(struct dw_hdmi *hdmi,
 	hdmi_writeb(hdmi, val, HDMI_FC_AVICONF2);
 
 	/* AVI data byte 4 differences: none */
-	if (!frame.video_code) {
-		unsigned int vrefresh = drm_mode_vrefresh(mode);
-
-		if (mode->hdisplay == 1920 && mode->vdisplay == 1080) {
-			if (mode->flags & DRM_MODE_FLAG_INTERLACE)
-				frame.video_code = (vrefresh == 50) ? 20 : 5;
-			else if (vrefresh == 24)
-				frame.video_code = 32;
-			else if (vrefresh == 25)
-				frame.video_code = 33;
-			else if (vrefresh == 30)
-				frame.video_code = 34;
-			else if (vrefresh == 50)
-				frame.video_code = 31;
-			else
-				frame.video_code = 16;
-		} else if (mode->hdisplay == 3840 && mode->vdisplay == 2160) {
-			if (vrefresh == 24)
-				frame.video_code = 93;
-			else if (vrefresh == 25)
-				frame.video_code = 94;
-			else if (vrefresh == 30)
-				frame.video_code = 95;
-			else if (vrefresh == 50)
-				frame.video_code = 96;
-			else
-				frame.video_code = 97;
-		} else if (mode->hdisplay == 1280 && mode->vdisplay == 720) {
-			frame.video_code = (vrefresh == 50) ? 19 : 4;
-		}
-	}
 	val = frame.video_code & 0x7f;
 	hdmi_writeb(hdmi, val, HDMI_FC_AVIVID);
 
