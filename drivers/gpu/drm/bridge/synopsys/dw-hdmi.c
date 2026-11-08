@@ -2566,8 +2566,29 @@ static const struct drm_connector_funcs dw_hdmi_connector_funcs = {
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
 };
 
+static enum drm_mode_status
+dw_hdmi_connector_mode_valid(struct drm_connector *connector,
+			     const struct drm_display_mode *mode)
+{
+	const struct drm_display_info *info = &connector->display_info;
+	bool is_hdmi2_sink = info->hdmi.scdc.supported;
+
+	/* If sink does not support HDMI2 SCDC, reject modes > 340MHz (e.g. 4K50/60 in RGB) */
+	if (!is_hdmi2_sink && mode->clock > 340000)
+		return MODE_CLOCK_HIGH;
+
+	if (info->max_tmds_clock && mode->clock > info->max_tmds_clock) {
+		if (!drm_mode_is_420_only(info, mode) &&
+		    !(is_hdmi2_sink && drm_mode_is_420_also(info, mode)))
+			return MODE_CLOCK_HIGH;
+	}
+
+	return MODE_OK;
+}
+
 static const struct drm_connector_helper_funcs dw_hdmi_connector_helper_funcs = {
 	.get_modes = dw_hdmi_connector_get_modes,
+	.mode_valid = dw_hdmi_connector_mode_valid,
 	.atomic_check = dw_hdmi_connector_atomic_check,
 };
 
