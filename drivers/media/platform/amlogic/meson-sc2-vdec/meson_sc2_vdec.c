@@ -141,8 +141,10 @@ static int sc2_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
 	pix->field = V4L2_FIELD_NONE;
 	pix->num_planes = 1;
 	memset(pix->plane_fmt, 0, sizeof(pix->plane_fmt));
-	pix->plane_fmt[0].sizeimage = clamp_t(u32, size, SC2_SOURCE_SIZE,
-					     32U * 1024U * 1024U);
+	/* The default is not a minimum for an explicit userspace capacity. */
+	pix->plane_fmt[0].sizeimage = size ?
+		clamp_t(u32, size, 4U * 1024U, 32U * 1024U * 1024U) :
+		SC2_SOURCE_SIZE;
 	if (!pix->colorspace)
 		pix->colorspace = V4L2_COLORSPACE_REC709;
 	memset(pix->reserved, 0, sizeof(pix->reserved));
