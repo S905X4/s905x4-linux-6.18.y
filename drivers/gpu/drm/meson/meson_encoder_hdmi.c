@@ -123,8 +123,10 @@ static enum drm_mode_status meson_encoder_hdmi_mode_valid(struct drm_bridge *bri
 {
 	struct meson_encoder_hdmi *encoder_hdmi = bridge_to_meson_encoder_hdmi(bridge);
 	struct meson_drm *priv = encoder_hdmi->priv;
-	bool is_hdmi2_sink = display_info->hdmi.scdc.supported;
+	bool mode_is_420 = drm_mode_is_420_only(display_info, mode) ||
+			   drm_mode_is_420_also(display_info, mode);
 	unsigned long long clock = mode->clock * 1000ULL;
+	unsigned int tmds_clock = mode->clock;
 	unsigned long long phy_freq;
 	unsigned long long vclk_freq;
 	unsigned long long venc_freq;
@@ -134,12 +136,17 @@ static enum drm_mode_status meson_encoder_hdmi_mode_valid(struct drm_bridge *bri
 
 	dev_dbg(priv->dev, "Modeline " DRM_MODE_FMT "\n", DRM_MODE_ARG(mode));
 
-	/* If sink does not support high clock, reject non-420 or non-HDMI2 modes */
+	/* Match the 8-bpc format preference of the downstream DW-HDMI bridge. */
+	if (mode_is_420)
+		tmds_clock = DIV_ROUND_UP(tmds_clock, 2);
 	if (display_info->max_tmds_clock &&
-	    mode->clock > display_info->max_tmds_clock &&
-	    !drm_mode_is_420_only(display_info, mode) &&
-	    !(is_hdmi2_sink && drm_mode_is_420_also(display_info, mode)))
+	    tmds_clock > display_info->max_tmds_clock)
 		return MODE_CLOCK_HIGH;
+	if (tmds_clock > 340000 &&
+	    (!display_info->hdmi.scdc.supported ||
+	     !display_info->hdmi.scdc.scrambling.supported))
+		return MODE_CLOCK_HIGH;
+
 	/* Check against non-VIC supported modes */
 	if (!vic) {
 		status = meson_venc_hdmi_supported_mode(mode);
@@ -154,9 +161,7 @@ static enum drm_mode_status meson_encoder_hdmi_mode_valid(struct drm_bridge *bri
 	vclk_freq = clock;
 
 	/* For 420, pixel clock is half unlike venc clock */
-	if (drm_mode_is_420_only(display_info, mode) ||
-	    (!is_hdmi2_sink &&
-	     drm_mode_is_420_also(display_info, mode)))
+	if (mode_is_420)
 		vclk_freq /= 2;
 
 	/* TMDS clock is pixel_clock * 10 */
@@ -170,10 +175,7 @@ static enum drm_mode_status meson_encoder_hdmi_mode_valid(struct drm_bridge *bri
 	hdmi_freq = vclk_freq;
 
 	/* VENC double pixels for 1080i, 720p and YUV420 modes */
-	if (meson_venc_hdmi_venc_repeat(vic) ||
-	    drm_mode_is_420_only(display_info, mode) ||
-	    (!is_hdmi2_sink &&
-	     drm_mode_is_420_also(display_info, mode)))
+	if (meson_venc_hdmi_venc_repeat(vic) || mode_is_420)
 		venc_freq *= 2;
 
 	vclk_freq = max(venc_freq, hdmi_freq);

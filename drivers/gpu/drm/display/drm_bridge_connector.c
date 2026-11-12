@@ -356,26 +356,9 @@ drm_bridge_connector_mode_valid(struct drm_connector *connector,
 {
 	struct drm_bridge_connector *bridge_connector =
 		to_drm_bridge_connector(connector);
-	const struct drm_display_info *info = &connector->display_info;
-	bool is_hdmi2_sink = info->hdmi.scdc.supported;
 
 	if (bridge_connector->bridge_hdmi)
 		return drm_hdmi_connector_mode_valid(connector, mode);
-
-	if (connector->connector_type == DRM_MODE_CONNECTOR_HDMIA) {
-		/*
-		 * On non-HDMI 2.0 sinks (no SCDC), high-bandwidth modes (> 340 MHz TMDS,
-		 * such as 4K 50/60 Hz in RGB) cannot be supported. Reject them so
-		 * userspace safely selects a supported mode (1080p50 or 4K30).
-		 */
-		if (!is_hdmi2_sink && mode->clock > 340000)
-			return MODE_CLOCK_HIGH;
-
-		if (info->max_tmds_clock && mode->clock > info->max_tmds_clock &&
-		    !drm_mode_is_420_only(info, mode) &&
-		    !(is_hdmi2_sink && drm_mode_is_420_also(info, mode)))
-			return MODE_CLOCK_HIGH;
-	}
 
 	return MODE_OK;
 }
