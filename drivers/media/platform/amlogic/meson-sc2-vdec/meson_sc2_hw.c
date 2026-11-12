@@ -261,14 +261,13 @@ static int sc2_drain(struct meson_sc2_hw *hw, bool *recovered)
 
 static void sc2_quarantine(struct meson_sc2_hw *hw, int error)
 {
-	dev_warn_ratelimited(hw->dev,
-		"HEVC DMA quiescence recovery (%d): resetting core for broadcast recovery\n",
+	if (hw->fatal)
+		return;
+	hw->fatal = true;
+	__module_get(THIS_MODULE);
+	dev_crit(hw->dev,
+		"HEVC DMA quiescence failed (%d): device, power, output dma-buf and all decoder allocations quarantined; controlled reboot required\n",
 		error);
-	/* Do not brick decoder with fatal quarantine; perform core reset to allow recovery */
-	sc2_write(hw, HEVC_PARSER_CORE_CONTROL, 0);
-	sc2_write(hw, HEVC_CABAC_CONTROL, 0);
-	sc2_write(hw, SC2_DOS_SW_RESET3, SC2_CORE_RESETS);
-	sc2_write(hw, SC2_DOS_SW_RESET3, 0);
 }
 
 static int sc2_power_on(struct meson_sc2_hw *hw)
