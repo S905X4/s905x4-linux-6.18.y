@@ -39,6 +39,25 @@ void amvdec_clear_dos_bits(struct amvdec_core *core, u32 reg, u32 val)
 }
 EXPORT_SYMBOL_GPL(amvdec_clear_dos_bits);
 
+void amvdec_set_output_format(struct amvdec_session *sess)
+{
+	struct amvdec_core *core = sess->core;
+	u32 value = amvdec_read_dos(core, MDEC_PIC_DC_CTRL);
+
+	value &= ~BIT(17);
+	if (sess->pixfmt_cap == V4L2_PIX_FMT_NV12M ||
+	    sess->pixfmt_cap == V4L2_PIX_FMT_NV21M)
+		value |= BIT(17);
+	/* SC2 decoder_v4l: bit16 selects VU; T7 has opposite polarity. */
+	if (core->platform->revision == VDEC_REVISION_SC2) {
+		value &= ~BIT(16);
+		if (sess->pixfmt_cap == V4L2_PIX_FMT_NV21M)
+			value |= BIT(16);
+	}
+	amvdec_write_dos(core, MDEC_PIC_DC_CTRL, value);
+}
+EXPORT_SYMBOL_GPL(amvdec_set_output_format);
+
 u32 amvdec_read_parser(struct amvdec_core *core, u32 reg)
 {
 	return readl_relaxed(core->esparser_base + reg);
@@ -139,7 +158,7 @@ static int set_canvas_yuv420m(struct amvdec_session *sess,
 	return 0;
 }
 
-static int set_canvas_nv12m(struct amvdec_session *sess,
+static int set_canvas_semiplanar(struct amvdec_session *sess,
 			    struct vb2_buffer *vb, u32 width,
 			    u32 height, u32 reg)
 {
@@ -207,7 +226,8 @@ int amvdec_set_canvases(struct amvdec_session *sess,
 
 		switch (pixfmt) {
 		case V4L2_PIX_FMT_NV12M:
-			ret = set_canvas_nv12m(sess, &buf->vb.vb2_buf, width,
+		case V4L2_PIX_FMT_NV21M:
+			ret = set_canvas_semiplanar(sess, &buf->vb.vb2_buf, width,
 					       height, reg_cur);
 			if (ret)
 				return ret;
@@ -314,6 +334,7 @@ static void dst_buf_done(struct amvdec_session *sess,
 
 	switch (sess->pixfmt_cap) {
 	case V4L2_PIX_FMT_NV12M:
+	case V4L2_PIX_FMT_NV21M:
 		vb2_set_plane_payload(&vbuf->vb2_buf, 0, output_size);
 		vb2_set_plane_payload(&vbuf->vb2_buf, 1, output_size / 2);
 		break;

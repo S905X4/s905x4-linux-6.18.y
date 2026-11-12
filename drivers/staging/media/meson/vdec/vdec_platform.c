@@ -294,12 +294,12 @@ static const struct amvdec_format vdec_formats_sm1[] = {
 /* Single-instance VDEC protocols. A secure ID is not a filename and must
  * never fall through to the old normal-world IMEM upload path.
  */
-#define SC2_FIXED_FORMAT(fourcc, ops, index, buffers, capture) { \
+#define SC2_FIXED_FORMAT(fourcc, ops, index, buffers, ...) { \
 	.pixfmt = (fourcc), .min_buffers = (buffers), .max_buffers = (buffers), \
 	.max_width = 1920, .max_height = 1088, \
 	.capture_width = 1920, .capture_height = 1088, .needs_capture = true, \
 	.vdec_ops = &vdec_1_ops, .codec_ops = &(ops), \
-	.firmware_index = (index), .pixfmts_cap = { (capture), 0 }, \
+	.firmware_index = (index), .pixfmts_cap = { __VA_ARGS__, 0 }, \
 	.flags = V4L2_FMT_FLAG_COMPRESSED | V4L2_FMT_FLAG_DYN_RESOLUTION, \
 }
 
@@ -313,15 +313,15 @@ static const struct amvdec_format vdec_formats_sc2[] = {
 		.vdec_ops = &vdec_1_ops,
 		.codec_ops = &codec_h264_ops,
 		.firmware_index = 0x0f,
-		.pixfmts_cap = { V4L2_PIX_FMT_NV12M, 0 },
+		.pixfmts_cap = { V4L2_PIX_FMT_NV12M, V4L2_PIX_FMT_NV21M, 0 },
 		.flags = V4L2_FMT_FLAG_COMPRESSED | V4L2_FMT_FLAG_DYN_RESOLUTION,
 	},
-	SC2_FIXED_FORMAT(V4L2_PIX_FMT_MPEG1, codec_mpeg12_multi_ops, 0x4d31324d, 8, V4L2_PIX_FMT_NV12M),
-	SC2_FIXED_FORMAT(V4L2_PIX_FMT_MPEG2, codec_mpeg12_multi_ops, 0x4d31324d, 8, V4L2_PIX_FMT_NV12M),
-	SC2_FIXED_FORMAT(V4L2_PIX_FMT_MPEG4, codec_mpeg4_ops, 0x4d34354d, 8, V4L2_PIX_FMT_NV12M),
+	SC2_FIXED_FORMAT(V4L2_PIX_FMT_MPEG1, codec_mpeg12_multi_ops, 0x4d31324d, 8, V4L2_PIX_FMT_NV12M, V4L2_PIX_FMT_NV21M),
+	SC2_FIXED_FORMAT(V4L2_PIX_FMT_MPEG2, codec_mpeg12_multi_ops, 0x4d31324d, 8, V4L2_PIX_FMT_NV12M, V4L2_PIX_FMT_NV21M),
+	SC2_FIXED_FORMAT(V4L2_PIX_FMT_MPEG4, codec_mpeg4_ops, 0x4d34354d, 8, V4L2_PIX_FMT_NV12M, V4L2_PIX_FMT_NV21M),
 	SC2_FIXED_FORMAT(V4L2_PIX_FMT_VC1_ANNEX_G, codec_vc1_ops, 9, 4, V4L2_PIX_FMT_NV12M),
 	SC2_FIXED_FORMAT(V4L2_PIX_FMT_VC1_ANNEX_L, codec_vc1_ops, 9, 4, V4L2_PIX_FMT_NV12M),
-	SC2_FIXED_FORMAT(V4L2_PIX_FMT_AVS, codec_avs_ops, MESON_AVS_FIRMWARE_INDEX, 8, V4L2_PIX_FMT_NV12M),
+	SC2_FIXED_FORMAT(V4L2_PIX_FMT_AVS, codec_avs_ops, MESON_AVS_FIRMWARE_INDEX, 8, V4L2_PIX_FMT_NV12M, V4L2_PIX_FMT_NV21M),
 	SC2_FIXED_FORMAT(V4L2_PIX_FMT_MJPEG, codec_mjpeg_ops, 5, 4, V4L2_PIX_FMT_YUV420M),
 };
 

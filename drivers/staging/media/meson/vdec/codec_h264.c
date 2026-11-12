@@ -4505,8 +4505,8 @@ static int h264_multi_run(struct amvdec_session *sess)
     amvdec_write_dos(core, AV_SCRATCH_9, BIT(2) |
         ((m->sequence_level & 0xff) << 7) |
         (m->dpb.bitstream_restriction_flag << 15));
-    amvdec_write_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(17));
-    amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(16) | BIT(31));
+    amvdec_set_output_format(sess);
+    amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(31));
     amvdec_write_dos(core, MDEC_PIC_DC_THRESH, 0x404038aa);
     /* The VLD/IQIDCT reset loses controls established by the parsed PPS. */
     if (m->iqidct_valid)
@@ -4977,6 +4977,7 @@ static void h264_multi_resume(struct amvdec_session *sess)
     dpb->colocated_buf_size = stride_mbs * height_mbs * 96;
     dpb->colocated_mv_addr_start = h264->ref_paddr;
     dpb->colocated_mv_addr_end = h264->ref_paddr + bytes;
+    amvdec_set_output_format(sess);
     m->waiting_capture = false;
     amvdec_write_dos(core, AV_SCRATCH_J, H264_ACTION_CONFIG_DONE);
     /* CONFIG_PARAM waits for allocation in scratch 0; scratch 7 is run restore. */

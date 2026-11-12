@@ -279,7 +279,8 @@ static int legacy_set_canvases(struct amvdec_session *sess)
 	int ret;
 
 	if ((planar ? sess->pixfmt_cap != V4L2_PIX_FMT_YUV420M :
-		      sess->pixfmt_cap != V4L2_PIX_FMT_NV12M) ||
+		      (sess->pixfmt_cap != V4L2_PIX_FMT_NV12M &&
+		       sess->pixfmt_cap != V4L2_PIX_FMT_NV21M)) ||
 	    sess->fmt_out->capture_width != LEGACY_WIDTH ||
 	    sess->fmt_out->capture_height != LEGACY_HEIGHT)
 		return -EINVAL;
@@ -406,12 +407,7 @@ static int legacy_configure(struct amvdec_session *sess)
 	amvdec_write_dos(core, PSCALE_CTRL, 0);
 	amvdec_write_dos(core, LEGACY_BUFFERIN, 0);
 	amvdec_write_dos(core, LEGACY_BUFFEROUT, 0);
-	/* Bit17 selects interleaved chroma; bit16=0 selects UV, not VU. */
-	if (sess->pixfmt_cap == V4L2_PIX_FMT_YUV420M)
-		amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(17));
-	else
-		amvdec_write_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(17));
-	amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(16));
+	amvdec_set_output_format(sess);
 
 
 
@@ -1162,8 +1158,8 @@ static void avsm_start_run(struct amvdec_session *sess, u32 slot)
 	if (ctx->avsm_context_valid)
 		amvdec_write_dos(core, LEGACY_SCRATCH_N, 0);
 	amvdec_write_dos(core, PSCALE_CTRL, 0);
-	amvdec_write_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(17));
-	amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(16) | BIT(31));
+	amvdec_set_output_format(sess);
+	amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(31));
 	/* Must precede vdec_enable_input(), also on resumed runs. */
 	amvdec_write_dos(core, AVSM_CONTROL, 0x4c80);
 	amvdec_write_dos_bits(core, VLD_MEM_VIFIFO_CONTROL, BIT(2) | BIT(1));

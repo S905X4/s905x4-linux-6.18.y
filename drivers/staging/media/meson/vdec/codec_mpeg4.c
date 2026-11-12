@@ -423,8 +423,7 @@ static int mpeg4_run(struct amvdec_session *sess)
 	amvdec_write_dos(core, MPEG4_INFO, 0);
 	amvdec_write_dos(core, MPEG4_DEBUG, 0);
 	amvdec_write_dos(core, MPEG4_ERRORS, 0);
-	amvdec_write_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(17));
-	amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(16));
+	amvdec_set_output_format(sess);
 	amvdec_write_dos(core, MDEC_PIC_DC_THRESH, 0x404038aa);
 	/* Match vmpeg4_hw_ctx_restore() ordering. Do not initialize IQIDCT
 	 * from an invalid context: its initial state belongs to core startup.
@@ -619,7 +618,8 @@ static int mpeg4_start(struct amvdec_session *sess)
 	int ret = -ENOMEM;
 
 	if (sess->core->platform->revision != VDEC_REVISION_SC2 ||
-	    sess->pixfmt_cap != V4L2_PIX_FMT_NV12M)
+	    (sess->pixfmt_cap != V4L2_PIX_FMT_NV12M &&
+	     sess->pixfmt_cap != V4L2_PIX_FMT_NV21M))
 		return -EINVAL;
 	m = kzalloc(sizeof(*m), GFP_KERNEL);
 	if (!m)
@@ -670,7 +670,8 @@ static void mpeg4_resume(struct amvdec_session *sess)
 	mutex_lock(&m->lock);
 	if (!m->ready) {
 		if (sess->num_dst_bufs != MPEG4_BUFFERS ||
-		    sess->pixfmt_cap != V4L2_PIX_FMT_NV12M) {
+		    (sess->pixfmt_cap != V4L2_PIX_FMT_NV12M &&
+		     sess->pixfmt_cap != V4L2_PIX_FMT_NV21M)) {
 			ret = -EINVAL;
 			goto unlock;
 		}

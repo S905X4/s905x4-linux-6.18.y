@@ -185,7 +185,9 @@ static int di_program(struct sc2_di_ctx *ctx,
 
 	di_write(di, DI_POST_GL_CTRL, 0x40200001);
 	di_write(di, IF0_BASE + IF_GEN3, (3 << 4) | (2 << 1));
-	di_write(di, IF0_BASE + IF_GEN2, 1); /* NV12, not NV21 */
+	/* SC2 set_di_mif_v3: chroma map 1=VU, 2=UV. */
+	di_write(di, IF0_BASE + IF_GEN2,
+		 ctx->fmt[0].pixelformat == V4L2_PIX_FMT_NV21M ? 1 : 2);
 	di_write(di, IF0_BASE + IF_CANVAS, di->canvas_id[0] |
 		 (di->canvas_id[1] << 8) | (di->canvas_id[1] << 16));
 	di_write(di, IF0_BASE + IF_X, (r->width - 1) << 16);
@@ -206,8 +208,12 @@ static int di_program(struct sc2_di_ctx *ctx,
 	di_write(di, DIWR_X, r->width - 1);
 	di_write(di, DIWR_Y, r->height - 1);
 	di_write(di, DIWR_CANVAS, di->canvas_id[2] | (di->canvas_id[3] << 8));
-	/* NV12 writeback: two planes, 8 bit, 420 chroma decimation. */
-	di_write(di, DIWR_CTRL, BIT(0) | BIT(3) | (3 << 4) | (2 << 22) | (2 << 26));
+	/* SC2 set_wrmif_simple_v3: bit17=0 writes VU, bit17=1 writes UV.
+	 * Input and output order are independent hardware MIF selections.
+	 */
+	di_write(di, DIWR_CTRL, BIT(0) | BIT(3) | (3 << 4) | (2 << 22) |
+		 (2 << 26) |
+		 (ctx->fmt[1].pixelformat == V4L2_PIX_FMT_NV12M ? BIT(17) : 0));
 	di_write(di, DI_POST_GL_THD, 8 << 16);
 	di_write(di, DI_POST_SIZE, ((r->height - 1) << 16) | (r->width - 1));
 	/* post + EI + mux + DDR; blend and MC deliberately disabled. */
@@ -509,9 +515,9 @@ static int di_querycap(struct file *file, void *fh, struct v4l2_capability *cap)
 
 static int di_enum_fmt(struct file *file, void *fh, struct v4l2_fmtdesc *f)
 {
-	if (f->index)
+	if (f->index > 1)
 		return -EINVAL;
-	f->pixelformat = V4L2_PIX_FMT_NV12M;
+	f->pixelformat = f->index ? V4L2_PIX_FMT_NV21M : V4L2_PIX_FMT_NV12M;
 	return 0;
 }
 
@@ -521,7 +527,8 @@ static int di_try_fmt(struct file *file, void *fh, struct v4l2_format *f)
 	unsigned int i;
 	u32 alignment = V4L2_TYPE_IS_OUTPUT(f->type) ? 32 : 64;
 
-	p->pixelformat = V4L2_PIX_FMT_NV12M;
+	if (p->pixelformat != V4L2_PIX_FMT_NV21M)
+		p->pixelformat = V4L2_PIX_FMT_NV12M;
 	p->width = clamp_t(u32, ALIGN(p->width, 2), 32, 1920);
 	p->height = clamp_t(u32, ALIGN(p->height, 4), 32, 1088);
 	p->num_planes = 2;
@@ -896,7 +903,7 @@ static int di_probe(struct platform_device *pdev)
 		pm_runtime_disable(dev);
 		goto unreg_v4l2;
 	}
-	dev_info(dev, "native SC2 hardware EI, NV12M, two progressive outputs per frame\n");
+	dev_info(dev, "native SC2 hardware EI, NV12M/NV21M, two progressive outputs per frame\n");
 	return 0;
 unreg_v4l2:
 	v4l2_device_unregister(&di->v4l2);

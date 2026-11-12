@@ -24,6 +24,9 @@ u32 amvdec_read_dos(struct amvdec_core *core, u32 reg);
 void amvdec_write_dos(struct amvdec_core *core, u32 reg, u32 val);
 void amvdec_write_dos_bits(struct amvdec_core *core, u32 reg, u32 val);
 void amvdec_clear_dos_bits(struct amvdec_core *core, u32 reg, u32 val);
+
+/* Restore PIC_DC layout after startup or a decoder-local reset. */
+void amvdec_set_output_format(struct amvdec_session *sess);
 u32 amvdec_read_parser(struct amvdec_core *core, u32 reg);
 void amvdec_write_parser(struct amvdec_core *core, u32 reg, u32 val);
 

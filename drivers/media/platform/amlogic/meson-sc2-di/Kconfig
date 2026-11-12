@@ -7,5 +7,6 @@ config VIDEO_MESON_SC2_DI
 	select VIDEOBUF2_DMA_CONTIG
 	help
 	  Native V4L2 M2M SC2 post-engine edge interpolation. Imports linear
-	  NV12M DMABUFs and exports progressive MMAP/DMABUF surfaces at field
-	  rate. This is spatial EI, not the vendor temporal MA/MC algorithm.
+	  NV12M/NV21M DMABUFs and exports progressive NV12M/NV21M MMAP/DMABUF
+	  surfaces at field rate. Chroma order conversion uses hardware MIFs.
+	  This is spatial EI, not the vendor temporal MA/MC algorithm.

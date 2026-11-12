@@ -238,6 +238,7 @@ static int vdec_queue_setup(struct vb2_queue *q, unsigned int *num_buffers,
 		case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
 			switch (sess->pixfmt_cap) {
 			case V4L2_PIX_FMT_NV12M:
+			case V4L2_PIX_FMT_NV21M:
 				if (*num_planes != 2 ||
 				    sizes[0] < output_size ||
 				    sizes[1] < output_size / 2)
@@ -269,6 +270,7 @@ static int vdec_queue_setup(struct vb2_queue *q, unsigned int *num_buffers,
 	case V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE:
 		switch (sess->pixfmt_cap) {
 		case V4L2_PIX_FMT_NV12M:
+		case V4L2_PIX_FMT_NV21M:
 			sizes[0] = output_size;
 			sizes[1] = output_size / 2;
 			*num_planes = 2;
@@ -636,7 +638,8 @@ vdec_try_fmt_common(struct amvdec_session *sess, u32 size,
 			pixmp->pixelformat = fmt_out->pixfmts_cap[0];
 
 		memset(pfmt[1].reserved, 0, sizeof(pfmt[1].reserved));
-		if (pixmp->pixelformat == V4L2_PIX_FMT_NV12M) {
+		if (pixmp->pixelformat == V4L2_PIX_FMT_NV12M ||
+		    pixmp->pixelformat == V4L2_PIX_FMT_NV21M) {
 			pfmt[0].sizeimage = output_size;
 			pfmt[0].bytesperline = stride;
 
@@ -774,8 +777,7 @@ static int vdec_s_fmt(struct file *file, void *fh, struct v4l2_format *f)
 
 	if (f->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
 		sess->fmt_out = fmt_out;
-	else if (f->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
-		sess->pixfmt_cap = format.fmt.pix_mp.pixelformat;
+	sess->pixfmt_cap = format.fmt.pix_mp.pixelformat;
 
 	return 0;
 }

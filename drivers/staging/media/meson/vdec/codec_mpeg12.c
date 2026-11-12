@@ -616,8 +616,7 @@ static int mpeg12_multi_run(struct amvdec_session *sess)
 	amvdec_write_dos(core, AV_SCRATCH_J,
 			 m->context_valid ? 0 : m->userdata_wp);
 	amvdec_write_dos(core, MREG_BUFFERIN, m->context_valid ? BIT(6) : 0);
-	amvdec_write_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(17));
-	amvdec_clear_dos_bits(core, MDEC_PIC_DC_CTRL, BIT(16));
+	amvdec_set_output_format(sess);
 	amvdec_write_dos(core, ASSIST_MBOX1_CLR_REG, 1);
 	amvdec_write_dos(core, ASSIST_MBOX1_MASK, 1);
 	m->active = index;
@@ -886,7 +885,8 @@ static int mpeg12_multi_start(struct amvdec_session *sess)
 	struct device *dev = sess->core->dev;
 
 	if (sess->core->platform->revision != VDEC_REVISION_SC2 ||
-	    sess->pixfmt_cap != V4L2_PIX_FMT_NV12M)
+	    (sess->pixfmt_cap != V4L2_PIX_FMT_NV12M &&
+	     sess->pixfmt_cap != V4L2_PIX_FMT_NV21M))
 		return -EINVAL;
 	m = kzalloc(sizeof(*m), GFP_KERNEL);
 	if (!m)
@@ -948,7 +948,8 @@ static void mpeg12_multi_resume(struct amvdec_session *sess)
 	mutex_lock(&m->lock);
 	if (!m->ready) {
 		if (sess->num_dst_bufs != MPEG12_MULTI_BUFFERS ||
-		    sess->pixfmt_cap != V4L2_PIX_FMT_NV12M) {
+		    (sess->pixfmt_cap != V4L2_PIX_FMT_NV12M &&
+		     sess->pixfmt_cap != V4L2_PIX_FMT_NV21M)) {
 			ret = -EINVAL;
 			goto unlock;
 		}
