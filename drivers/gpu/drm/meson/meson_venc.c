@@ -959,6 +959,8 @@ void meson_venc_hdmi_mode_set(struct meson_drm *priv, int vic,
 	bool use_enci = false;
 	bool venc_repeat = false;
 	bool hdmi_repeat = false;
+	bool sc2_uhd420 = priv->sc2 && yuv420_mode &&
+		(vic == 96 || vic == 97 || vic == 106 || vic == 107);
 	unsigned int venc_hdmi_latency = 2;
 	unsigned long total_pixels_venc = 0;
 	unsigned long active_pixels_venc = 0;
@@ -973,6 +975,7 @@ void meson_venc_hdmi_mode_set(struct meson_drm *priv, int vic,
 	unsigned long hs_begin = 0;
 	unsigned long hs_end = 0;
 	unsigned long vs_adjust = 0;
+	unsigned int vs_adjust_420 = sc2_uhd420 ? 1 : 0;
 	unsigned long vs_bline_evn = 0;
 	unsigned long vs_eline_evn = 0;
 	unsigned long vs_bline_odd = 0;
@@ -1466,16 +1469,16 @@ void meson_venc_hdmi_mode_set(struct meson_drm *priv, int vic,
 		writel_relaxed(hs_end,
 				priv->io_base + _REG(ENCP_DVI_HSO_END));
 
-		/* Program Vsync timing for even field */
-		if (de_v_begin_even >=
+		/* SC2's UHD420 line buffer delays active pixels by one line. */
+		if (de_v_begin_even + vs_adjust_420 >=
 				(sof_lines + vsync_lines + (1 - vs_adjust)))
-			vs_bline_evn = de_v_begin_even
+			vs_bline_evn = de_v_begin_even + vs_adjust_420
 					- sof_lines
 					- vsync_lines
 					- (1 - vs_adjust);
 		else
 			vs_bline_evn = mode->vtotal
-					+ de_v_begin_even
+					+ de_v_begin_even + vs_adjust_420
 					- sof_lines
 					- vsync_lines
 					- (1 - vs_adjust);
@@ -1541,7 +1544,9 @@ void meson_venc_hdmi_mode_set(struct meson_drm *priv, int vic,
 	 * Write rate to the async FIFO between VENC and HDMI.
 	 * One write every 2 wr_clk.
 	 */
-	if (venc_repeat || yuv420_mode)
+	if (sc2_uhd420)
+		reg |= VPU_HDMI_SC2_UHD420_FIFO;
+	else if (venc_repeat || yuv420_mode)
 		reg |= VPU_HDMI_WR_RATE(2);
 
 	/*

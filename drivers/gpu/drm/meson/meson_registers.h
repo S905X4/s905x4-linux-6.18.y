@@ -1638,6 +1638,7 @@
 #define		VPU_HDMI_OUTPUT_CRCBY           (5 << 5)
 #define		VPU_HDMI_WR_RATE(rate)          (((rate & 0x1f) - 1) << 8)
 #define		VPU_HDMI_RD_RATE(rate)          (((rate & 0x1f) - 1) << 12)
+#define		VPU_HDMI_SC2_UHD420_FIFO         BIT(20)
 #define ENCI_INFO_READ 0x271c
 #define ENCP_INFO_READ 0x271d
 #define ENCT_INFO_READ 0x271e
