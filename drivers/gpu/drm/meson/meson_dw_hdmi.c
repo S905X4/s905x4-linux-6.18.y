@@ -455,8 +455,10 @@ static int dw_hdmi_phy_init(struct dw_hdmi *hdmi, void *data,
 	msleep(20);
 	dw_hdmi->data->top_write(dw_hdmi, HDMITX_TOP_TMDS_CLK_PTTN_CNTL, 0x2);
 
-	/* Setup PHY parameters */
-	if (!priv->sc2)
+	/* SC2 requires CTRL0 powered off before its clock/FIFO reset sequence. */
+	if (priv->sc2)
+		meson_hdmi_phy_write(priv, HHI_HDMI_PHY_CNTL0, 0);
+	else
 		meson_hdmi_phy_setup_mode(dw_hdmi, mode, mode_is_420);
 
 	/* Disable clock, fifo, fifo_wr */
@@ -659,6 +661,15 @@ static const struct meson_dw_hdmi_data meson_dw_hdmi_g12a_data = {
 	.dwc_read = dw_hdmi_g12a_dwc_read,
 	.dwc_write = dw_hdmi_g12a_dwc_write,
 	.cntl0_init = 0x000b4242, /* Bandgap */
+	.cntl1_init = PHY_CNTL1_INIT,
+};
+
+static const struct meson_dw_hdmi_data meson_dw_hdmi_sc2_data = {
+	.top_read = dw_hdmi_g12a_top_read,
+	.top_write = dw_hdmi_g12a_top_write,
+	.dwc_read = dw_hdmi_dwc_read,
+	.dwc_write = dw_hdmi_dwc_write,
+	.cntl0_init = 0,
 	.cntl1_init = PHY_CNTL1_INIT,
 };
 
@@ -949,7 +960,7 @@ static const struct of_device_id meson_dw_hdmi_of_table[] = {
 	{ .compatible = "amlogic,meson-g12a-dw-hdmi",
 	  .data = &meson_dw_hdmi_g12a_data },
 	{ .compatible = "amlogic,meson-sc2-dw-hdmi",
-	  .data = &meson_dw_hdmi_g12a_data },
+	  .data = &meson_dw_hdmi_sc2_data },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, meson_dw_hdmi_of_table);
