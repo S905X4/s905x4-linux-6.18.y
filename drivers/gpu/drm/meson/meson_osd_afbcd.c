@@ -305,8 +305,9 @@ static int meson_g12a_afbcd_init(struct meson_drm *priv)
 
 	meson_rdma_setup(priv);
 
-	/* Handle AFBC Decoder reset manually */
-	writel_bits_relaxed(MALI_AFBCD_MANUAL_RESET, MALI_AFBCD_MANUAL_RESET,
+	/* Use frame-boundary resets on SC2; retain G12A's manual workaround. */
+	writel_bits_relaxed(MALI_AFBCD_MANUAL_RESET,
+			    priv->sc2 ? 0 : MALI_AFBCD_MANUAL_RESET,
 			    priv->io_base + _REG(MALI_AFBCD_TOP_CTRL));
 
 	return 0;
