@@ -95,7 +95,9 @@ static void sc2_capture_format(struct sc2_ctx *ctx,
 	bool fbc = pix->pixelformat == V4L2_PIX_FMT_AMLOGIC_FBC10 &&
 		   ctx->source_fmt.pixelformat == V4L2_PIX_FMT_HEVC_SLICE;
 
-	pix->pixelformat = fbc ? V4L2_PIX_FMT_AMLOGIC_FBC10 : V4L2_PIX_FMT_NV12;
+	pix->pixelformat = fbc ? V4L2_PIX_FMT_AMLOGIC_FBC10 :
+		pix->pixelformat == V4L2_PIX_FMT_NV21 ? V4L2_PIX_FMT_NV21 :
+		V4L2_PIX_FMT_NV12;
 	pix->width = ALIGN(ctx->source_fmt.width, 64);
 	pix->height = ALIGN(ctx->source_fmt.height, 64);
 	pix->field = V4L2_FIELD_NONE;
@@ -178,16 +180,22 @@ static int sc2_set_fmt(struct file *file, void *priv, struct v4l2_format *f)
 static int sc2_enum_fmt(struct file *file, void *priv, struct v4l2_fmtdesc *f)
 {
 	struct sc2_ctx *ctx = sc2_file_ctx(file);
-	unsigned int last = V4L2_TYPE_IS_OUTPUT(f->type) ||
-		ctx->source_fmt.pixelformat == V4L2_PIX_FMT_HEVC_SLICE;
+	bool output = V4L2_TYPE_IS_OUTPUT(f->type);
+	bool hevc = ctx->source_fmt.pixelformat == V4L2_PIX_FMT_HEVC_SLICE;
+	unsigned int last = !output && hevc ? 2 : 1;
 
 	if (f->index > last)
 		return -EINVAL;
-	if (V4L2_TYPE_IS_OUTPUT(f->type)) {
+	if (output) {
 		f->pixelformat = f->index ? V4L2_PIX_FMT_AV1_FRAME : V4L2_PIX_FMT_HEVC_SLICE;
 		f->flags = V4L2_FMT_FLAG_COMPRESSED;
 	} else {
-		f->pixelformat = f->index ? V4L2_PIX_FMT_AMLOGIC_FBC10 : V4L2_PIX_FMT_NV12;
+		if (!f->index)
+			f->pixelformat = V4L2_PIX_FMT_NV12;
+		else if (f->index == 1 && hevc)
+			f->pixelformat = V4L2_PIX_FMT_AMLOGIC_FBC10;
+		else
+			f->pixelformat = V4L2_PIX_FMT_NV21;
 	}
 	return 0;
 }
@@ -198,6 +206,7 @@ static int sc2_enum_framesizes(struct file *file, void *priv,
 	if (f->index || (f->pixel_format != V4L2_PIX_FMT_HEVC_SLICE &&
 			f->pixel_format != V4L2_PIX_FMT_AV1_FRAME &&
 			f->pixel_format != V4L2_PIX_FMT_NV12 &&
+			f->pixel_format != V4L2_PIX_FMT_NV21 &&
 			f->pixel_format != V4L2_PIX_FMT_AMLOGIC_FBC10))
 		return -EINVAL;
 	f->type = V4L2_FRMSIZE_TYPE_STEPWISE;
@@ -205,11 +214,13 @@ static int sc2_enum_framesizes(struct file *file, void *priv,
 	f->stepwise.max_width = f->pixel_format == V4L2_PIX_FMT_AV1_FRAME ?
 		1920 : SC2_MAX_WIDTH;
 	f->stepwise.step_width = f->pixel_format == V4L2_PIX_FMT_NV12 ||
+		f->pixel_format == V4L2_PIX_FMT_NV21 ||
 		f->pixel_format == V4L2_PIX_FMT_AMLOGIC_FBC10 ? 64 : 2;
 	f->stepwise.min_height = 64;
 	f->stepwise.max_height = f->pixel_format == V4L2_PIX_FMT_AV1_FRAME ?
 		1088 : SC2_MAX_HEIGHT;
 	f->stepwise.step_height = f->pixel_format == V4L2_PIX_FMT_NV12 ||
+		f->pixel_format == V4L2_PIX_FMT_NV21 ||
 		f->pixel_format == V4L2_PIX_FMT_AMLOGIC_FBC10 ? 64 : 2;
 	return 0;
 }
@@ -726,6 +737,7 @@ static int sc2_prepare_job(struct sc2_ctx *ctx, struct vb2_v4l2_buffer *src,
 	job->output_dma = vb2_dma_contig_plane_dma_addr(&dst->m2m.vb.vb2_buf, 0);
 	job->output_size = ctx->capture_fmt.plane_fmt[0].sizeimage;
 	job->output_stride = ctx->capture_fmt.width;
+	job->output_format = ctx->capture_fmt.pixelformat;
 	job->output_uv_offset = job->output_stride * ctx->capture_fmt.height;
 	job->output_buffer = dst->output_buffer;
 	return 0;
@@ -774,6 +786,7 @@ static int sc2_decode_av1(struct sc2_ctx *ctx, struct vb2_v4l2_buffer *src,
 	job.output.output_dma = vb2_dma_contig_plane_dma_addr(&dst->m2m.vb.vb2_buf, 0);
 	job.output.output_size = ctx->capture_fmt.plane_fmt[0].sizeimage;
 	job.output.output_stride = ctx->capture_fmt.plane_fmt[0].bytesperline;
+	job.output.output_format = ctx->capture_fmt.pixelformat;
 	job.output.output_uv_offset = job.output.output_stride * ctx->capture_fmt.height;
 	job.output.output_buffer = dst->output_buffer;
 	job.timestamp = src->vb2_buf.timestamp;

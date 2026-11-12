@@ -676,7 +676,7 @@ static int sc2_av1_validate(struct meson_sc2_hevc_context *ctx,
     bool intra = f->frame_type == V4L2_AV1_KEY_FRAME ||
                  f->frame_type == V4L2_AV1_INTRA_ONLY_FRAME;
 
-    /* Main8 NV12 only. DW8 is not full-depth Main10. The stock workspace
+    /* Main8 NV12/NV21 only. DW8 is not full-depth Main10. The stock workspace
      * capacities are the <=1920x1088 layout, not an invented 4K layout. */
     if (s->seq_profile || s->bit_depth != 8 || width < 64 || height < 64 ||
         width > 1920 || height > 1088 || (height & 1) ||
@@ -701,6 +701,8 @@ static int sc2_av1_validate(struct meson_sc2_hevc_context *ctx,
     if (!owner || (owner->context && owner->context != ctx) ||
         owner->surface.width != f->upscaled_width || owner->surface.height != height ||
         owner->surface.depth != 8 || owner->surface.mv_size < SZ_1M ||
+        (out->output_format != V4L2_PIX_FMT_NV12 &&
+         out->output_format != V4L2_PIX_FMT_NV21) ||
         !out->output_buffer || out->output_stride != ALIGN(f->upscaled_width, 64) ||
         out->output_uv_offset != out->output_stride * ALIGN(height, 64) ||
         out->output_size < out->output_uv_offset * 3 / 2 ||
@@ -860,7 +862,8 @@ static void sc2_av1_program(struct meson_sc2_hevc_context *ctx,
     sc2_write(hw, HEVC_SAO_C_WPTR,
               lower_32_bits(hw->output_dma) + out->output_uv_offset);
     value = sc2_read(hw, HEVC_SAO_CTRL1) & ~(0x3000 | 0xff0 | 3 | (3 << 14));
-    sc2_write(hw, HEVC_SAO_CTRL1, value | 0xff0 | BIT(8) | (2 << 14));
+    sc2_write(hw, HEVC_SAO_CTRL1, value |
+              (out->output_format == V4L2_PIX_FMT_NV21 ? 0xef0 : 0xff0) | (2 << 14));
     value = sc2_read(hw, HEVCD_IPP_AXIIF_CONFIG) & ~(0x30 | 0xf | BIT(12) | (3 << 8));
     sc2_write(hw, HEVCD_IPP_AXIIF_CONFIG, value | 0xf | (2 << 8));
     av1_seq_filters(st, hw, p);

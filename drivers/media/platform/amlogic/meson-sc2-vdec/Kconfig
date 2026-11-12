@@ -15,7 +15,7 @@ config VIDEO_MESON_SC2_HEVC
 	  HEVC OUTPUT contains frame-based native slice controls and raw NAL
 	  units without start codes. AV1 OUTPUT tile offsets address coded tile
 	  bytes; sequence/frame headers are rebuilt from native AV1 controls.
-	  Main8 CAPTURE is contiguous NV12. HEVC Main10 CAPTURE uses the local
+	  Main8 CAPTURE is contiguous NV12 or NV21. HEVC Main10 CAPTURE uses the local
 	  proposed AMF0 Amlogic scatter-FBC ABI with exported vb2-owned header/body
 	  storage, not an eight-bit preview. AV1 supports fixed output size
 	  <=1920x1088, superresolution, 64x64/128x128 superblocks and <=256 tiles.

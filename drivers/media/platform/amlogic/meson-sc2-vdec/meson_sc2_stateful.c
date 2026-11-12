@@ -816,6 +816,7 @@ static int sc2_stateful_decode(struct sc2_stateful_ctx *ctx,
 		output.destination = &dst->surface;
 		output.output_dma = vb2_dma_contig_plane_dma_addr(&dst->m2m.vb.vb2_buf, 0);
 		output.output_size = ctx->capture_fmt.plane_fmt[0].sizeimage;
+		output.output_format = ctx->capture_fmt.pixelformat;
 		output.output_buffer = dst->export;
 	}
 	if (sc2_stateful_avs2(ctx)) {

@@ -24,6 +24,7 @@
 #include <linux/soc/amlogic/meson-sc2-dos.h>
 #include <linux/string.h>
 #include <linux/wait.h>
+#include <linux/videodev2.h>
 
 #include "meson_sc2_hw.h"
 #include "hevc_request_syntax.h"
@@ -1174,8 +1175,11 @@ static int sc2_program_slice(struct meson_sc2_hevc_context *ctx,
 		sc2_write(hw, HEVC_DBLK_STS1 + 16, BIT(28));
 	}
 	value = sc2_read(hw, HEVC_SAO_CTRL1) & ~(0x3000 | 0xff0 | 3 | (3 << 14));
-	sc2_write(hw, HEVC_SAO_CTRL1, value | 0xff0 | (2 << 14));
-	value = sc2_read(hw, HEVCD_IPP_AXIIF_CONFIG) & ~(0x30 | 0xf | (3 << 8));
+	/* SAO chroma byte-lane bit 8 selects UV (NV12) versus VU (NV21). */
+	sc2_write(hw, HEVC_SAO_CTRL1, value |
+		  (job->output_format == V4L2_PIX_FMT_NV21 ? 0xef0 : 0xff0) | (2 << 14));
+	/* References stay compressed; do not apply CAPTURE's VU swap to IPP. */
+	value = sc2_read(hw, HEVCD_IPP_AXIIF_CONFIG) & ~(0x30 | 0xf | BIT(12) | (3 << 8));
 	sc2_write(hw, HEVCD_IPP_AXIIF_CONFIG, value | 0xf | (2 << 8));
 	filter = disabled << 2;
 	if (!disabled)
@@ -1235,11 +1239,14 @@ static int sc2_validate_job(struct meson_sc2_hevc_context *ctx,
 	    job->output_buffer->size < job->output_size)
 		return -EINVAL;
 	if (sps->bit_depth_luma_minus8 == 2) {
-		if (!job->destination->capture_owned ||
+		if (job->output_format != V4L2_PIX_FMT_AMLOGIC_FBC10 ||
+		    !job->destination->capture_owned ||
 		    job->output_size != meson_sc2_hevc_fbc_size(width, height) ||
 		    !ctx->dw8 || ctx->dw8_size < uv + uv / 2)
 			return -EINVAL;
-	} else if (job->destination->capture_owned || job->output_size < uv + uv / 2) {
+	} else if ((job->output_format != V4L2_PIX_FMT_NV12 &&
+		    job->output_format != V4L2_PIX_FMT_NV21) ||
+		   job->destination->capture_owned || job->output_size < uv + uv / 2) {
 		return -EINVAL;
 	}
 	owner = sc2_owner(ctx->hw, job->destination);

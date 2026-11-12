@@ -43,6 +43,8 @@ struct meson_sc2_hevc_job {
 	dma_addr_t output_dma;
 	size_t output_size;
 	u32 output_stride;
+	/* Negotiated V4L2 CAPTURE fourcc, separate from FBC reference depth. */
+	u32 output_format;
 	/* Caller-owned allocation; hardware pins it until DMA is quiescent. */
 	struct dma_buf *output_buffer;
 	u32 output_uv_offset;

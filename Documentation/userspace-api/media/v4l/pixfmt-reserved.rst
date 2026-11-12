@@ -311,10 +311,15 @@ PRIME formatter. ``AMF8`` is the stateful VP9/AVS2 eight-bit counterpart. These
 are not NV12, P010, Raspberry Pi NC30, AM21C, or portable compressed files.
 Applications must negotiate the exact fourcc for the parsed depth; ten-bit
 input paired with eight-bit CAPTURE is rejected rather than truncated.
-HEVC Main8 and AV1 Request capture remain NV12, unchanged by the stateful node.
+HEVC Main8 and AV1 Request capture use linear NV12 or NV21. Both have one
+memory plane, equal Y/chroma pitches, and 64-pixel padded dimensions. The
+interleaved UV (NV12) or VU (NV21) region starts at ``bytesperline`` times
+the padded CAPTURE height, not the visible height. The default remains NV12;
+the linear chroma order does not change the private compressed references.
 
-CAPTURE uses the multi-planar API with one memory plane, zero ``bytesperline``
-(there is no CPU-linear row pitch), and width/height rounded up to 64 pixels.
+``AMF0``/``AMF8`` CAPTURE uses the multi-planar API with one memory plane,
+zero ``bytesperline`` (there is no CPU-linear row pitch), and width/height
+rounded up to 64 pixels.
 The coded rectangle is returned by ``V4L2_SEL_TGT_COMPOSE``. For the returned
 padded dimensions ``W`` and ``H``, the allocation layout is:
 
