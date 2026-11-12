@@ -919,7 +919,7 @@ static void meson_vclk_set(struct meson_drm *priv,
 			   unsigned int hdmi_tx_div, unsigned int venc_div,
 			   bool hdmi_use_enci, bool vic_alternate_clock)
 {
-	unsigned int m = 0, frac = 0;
+	unsigned int m = 0, frac = 0, venc_source;
 
 	/* Set HDMI-TX sys clock */
 	meson_vclk_update_bits(priv, HHI_HDMI_CLK_CNTL, CTS_HDMI_SYS_SEL_MASK, 0);
@@ -1098,6 +1098,16 @@ static void meson_vclk_set(struct meson_drm *priv,
 	else
 		/* Enable ENCP clock gate */
 		meson_vclk_update_bits(priv, HHI_VID_CLK_CNTL2, CTS_ENCP_EN, CTS_ENCP_EN);
+
+	/* SC2 clocks the HDMI frontend separately from the transport pixels. */
+	if (priv->sc2) {
+		regmap_read(priv->hhi, meson_vclk_reg(priv, HHI_VID_CLK_DIV),
+			    &venc_source);
+		venc_source = (venc_source >> (hdmi_use_enci ? 28 : 24)) & 0xf;
+		meson_vclk_update_bits(priv, HHI_HDMI_CLK_CNTL, GENMASK(23, 20),
+				       venc_source << 20);
+		meson_vclk_update_bits(priv, HHI_VID_CLK_CNTL2, BIT(9), BIT(9));
+	}
 
 	meson_vclk_update_bits(priv, HHI_VID_CLK_CNTL, VCLK_EN, VCLK_EN);
 }
