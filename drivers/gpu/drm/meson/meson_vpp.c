@@ -153,6 +153,15 @@ void meson_vpp_init(struct meson_drm *priv)
 	} else if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A))
 		writel_relaxed(0xf, priv->io_base + _REG(DOLBY_PATH_CTRL));
 
+	/* SC2 blends ten-bit YCbCr, including when only VD2 remains enabled. */
+	if (priv->sc2) {
+		writel_relaxed(0x04080200, priv->io_base + _REG(VPP_DUMMY_DATA));
+		writel_relaxed(0x008080, priv->io_base +
+			       _REG(VPP_POST_BLEND_BLEND_DUMMY_DATA));
+		writel_relaxed(0x7fffffff, priv->io_base +
+			       _REG(VPP_POST_BLEND_DUMMY_ALPHA));
+	}
+
 	/* Initialize vpu fifo control registers */
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A))
 		writel_relaxed(VPP_OFIFO_SIZE_DEFAULT,
