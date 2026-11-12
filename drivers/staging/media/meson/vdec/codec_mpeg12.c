@@ -840,6 +840,9 @@ static int mpeg12_multi_prepare_input(struct amvdec_session *sess,
 	bool slice = false, header = false;
 	int ret = 0;
 
+	if (!data)
+		return -EFAULT;
+
 	mutex_lock(&m->lock);
 	if (m->input_refs >= 2)
 		goto unlock;
