@@ -667,8 +667,8 @@ static const struct meson_dw_hdmi_data meson_dw_hdmi_g12a_data = {
 static const struct meson_dw_hdmi_data meson_dw_hdmi_sc2_data = {
 	.top_read = dw_hdmi_g12a_top_read,
 	.top_write = dw_hdmi_g12a_top_write,
-	.dwc_read = dw_hdmi_dwc_read,
-	.dwc_write = dw_hdmi_dwc_write,
+	.dwc_read = dw_hdmi_g12a_dwc_read,
+	.dwc_write = dw_hdmi_g12a_dwc_write,
 	.cntl0_init = 0,
 	.cntl1_init = PHY_CNTL1_INIT,
 };
