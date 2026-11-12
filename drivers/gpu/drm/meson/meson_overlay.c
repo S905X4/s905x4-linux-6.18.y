@@ -613,20 +613,6 @@ static void meson_overlay_atomic_update(struct drm_plane *plane,
 					     VD_VERT_PHASE_STEP(8) | /* /4 */
 					     VD_VERT_FMT_EN;
 		break;
-	case DRM_FORMAT_P010:
-		priv->viu.vd1_if0_gen_reg |= VD_SEPARATE_EN | VD_BYTES_PER_PIXEL(1);
-		priv->viu.vd1_if0_canvas0 =
-					CANVAS_ADDR2(priv->canvas_id_vd1_1) |
-					CANVAS_ADDR1(priv->canvas_id_vd1_1) |
-					CANVAS_ADDR0(priv->canvas_id_vd1_0);
-		priv->viu.vd1_if0_gen_reg2 = VD_COLOR_MAP(1);
-		priv->viu.viu_vd1_fmt_ctrl = VD_HORZ_Y_C_RATIO(1) | /* /2 */
-					     VD_HORZ_FMT_EN |
-					     VD_VERT_RPT_LINE0 |
-					     VD_VERT_INITIAL_PHASE(12) |
-					     VD_VERT_PHASE_STEP(8) | /* /4 */
-					     VD_VERT_FMT_EN;
-		break;
 	case DRM_FORMAT_YUV444:
 	case DRM_FORMAT_YUV422:
 	case DRM_FORMAT_YUV420:
@@ -779,7 +765,8 @@ static bool meson_overlay_format_mod_supported(struct drm_plane *plane,
 					       u32 format, u64 modifier)
 {
 	if (modifier == DRM_FORMAT_MOD_LINEAR &&
-	    format != DRM_FORMAT_YUV420_8BIT)
+	    format != DRM_FORMAT_YUV420_8BIT &&
+	    format != DRM_FORMAT_YUV420_10BIT)
 		return true;
 
 	if ((modifier & DRM_FORMAT_MOD_AMLOGIC_FBC(0, 0)) ==
@@ -835,14 +822,13 @@ static const uint32_t supported_drm_formats[] = {
 	DRM_FORMAT_YUYV,
 	DRM_FORMAT_NV12,
 	DRM_FORMAT_NV21,
-	DRM_FORMAT_P010,
 	DRM_FORMAT_YUV444,
 	DRM_FORMAT_YUV422,
 	DRM_FORMAT_YUV420,
 	DRM_FORMAT_YUV411,
 	DRM_FORMAT_YUV410,
 	DRM_FORMAT_YUV420_8BIT, /* Amlogic FBC Only */
-	DRM_FORMAT_YUV420_10BIT, /* Amlogic FBC and Linear 10-bit */
+	DRM_FORMAT_YUV420_10BIT, /* Amlogic FBC Only */
 };
 
 static const uint64_t format_modifiers[] = {
@@ -880,8 +866,8 @@ int meson_overlay_create(struct meson_drm *priv)
 
 	drm_plane_helper_add(plane, &meson_overlay_helper_funcs);
 
-	/* Default zpos: VD Overlay plane is on the back */
-	drm_plane_create_zpos_property(plane, 0, 0, 255);
+	/* For now, VD Overlay plane is always on the back */
+	drm_plane_create_zpos_immutable_property(plane, 0);
 
 	priv->overlay_plane = plane;
 

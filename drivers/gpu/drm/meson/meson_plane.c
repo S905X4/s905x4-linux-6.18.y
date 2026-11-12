@@ -150,7 +150,6 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	int hf_bank_len;
 	int vf_bank_len;
 	u8 canvas_id_osd1;
-	u16 global_alpha;
 	bool sc2_interlace = priv->sc2 &&
 		(new_state->crtc->mode.flags & DRM_MODE_FLAG_INTERLACE);
 
@@ -170,13 +169,9 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	else
 		priv->viu.osd1_afbcd = false;
 
-	/* Enable OSD and BLK0, set global alpha */
-	global_alpha = new_state->alpha >> 8;
-	if (global_alpha == 0xff)
-		global_alpha = 0x100;
-
+	/* Enable OSD and BLK0, set max global alpha */
 	priv->viu.osd1_ctrl_stat = OSD_ENABLE |
-				   (global_alpha << OSD_GLOBAL_ALPHA_SHIFT) |
+				   (0x100 << OSD_GLOBAL_ALPHA_SHIFT) |
 				   OSD_BLK0_ENABLE;
 
 	priv->viu.osd1_ctrl_stat2 = readl(priv->io_base +
@@ -247,11 +242,8 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 		break;
 	case DRM_FORMAT_ARGB8888:
 	case DRM_FORMAT_ABGR8888:
-		/* For ARGB, respect pixel_blend_mode */
-		if (new_state->pixel_blend_mode == DRM_MODE_BLEND_PIXEL_NONE)
-			priv->viu.osd1_ctrl_stat2 |= OSD_REPLACE_EN;
-		else
-			priv->viu.osd1_ctrl_stat2 &= ~OSD_REPLACE_EN;
+		/* For ARGB, use the pixel's alpha */
+		priv->viu.osd1_ctrl_stat2 &= ~OSD_REPLACE_EN;
 		break;
 	}
 
@@ -599,13 +591,8 @@ int meson_plane_create(struct meson_drm *priv)
 
 	drm_plane_helper_add(plane, &meson_plane_helper_funcs);
 
-	/* Default zpos: OSD Primary plane is on the front */
-	drm_plane_create_zpos_property(plane, 1, 0, 255);
-	drm_plane_create_alpha_property(plane);
-	drm_plane_create_blend_mode_property(plane,
-					     BIT(DRM_MODE_BLEND_PREMULTI) |
-					     BIT(DRM_MODE_BLEND_COVERAGE) |
-					     BIT(DRM_MODE_BLEND_PIXEL_NONE));
+	/* For now, OSD Primary plane is always on the front */
+	drm_plane_create_zpos_immutable_property(plane, 1);
 
 	priv->primary_plane = plane;
 

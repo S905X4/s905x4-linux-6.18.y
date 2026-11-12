@@ -34,8 +34,6 @@ static struct rc_map_table hk1_rbox_x4[] = {
 	{ 0x041d, KEY_DOWN },
 	{ 0x041c, KEY_LEFT },
 	{ 0x0448, KEY_RIGHT },
-	{ 0x045c, KEY_OK },
-	{ 0x045c, KEY_ENTER },
 	{ 0x0453, KEY_MENU },
 	{ 0x0445, KEY_VOLUMEUP },
 	{ 0x0419, KEY_VOLUMEDOWN },

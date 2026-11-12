@@ -277,6 +277,8 @@ static bool meson_g12a_afbcd_supported_fmt(u64 modifier, uint32_t format)
 
 static int meson_g12a_afbcd_reset(struct meson_drm *priv)
 {
+	meson_rdma_reset(priv);
+
 	/* SC2 does not need G12A's reset on every RDMA replay. */
 	if (priv->sc2) {
 		writel(VIU_SW_RESET_G12A_AFBC_ARB |
@@ -284,7 +286,6 @@ static int meson_g12a_afbcd_reset(struct meson_drm *priv)
 		       priv->io_base + _REG(VIU_SW_RESET));
 		writel(0, priv->io_base + _REG(VIU_SW_RESET));
 	} else {
-		meson_rdma_reset(priv);
 		meson_rdma_writel_sync(priv, VIU_SW_RESET_G12A_AFBC_ARB |
 				       VIU_SW_RESET_G12A_OSD1_AFBCD,
 				       VIU_SW_RESET);
@@ -350,6 +351,9 @@ static int meson_g12a_afbcd_setup(struct meson_drm *priv)
 	u32 format = meson_g12a_afbcd_pixel_fmt(priv->afbcd.modifier,
 						priv->afbcd.format);
 
+	/* Disarm the old vsync table before building the next one. */
+	if (priv->sc2)
+		meson_rdma_reset(priv);
 
 	if (priv->afbcd.modifier & AFBC_FORMAT_MOD_YTR)
 		format |= VPU_MAFBC_YUV_TRANSFORM;

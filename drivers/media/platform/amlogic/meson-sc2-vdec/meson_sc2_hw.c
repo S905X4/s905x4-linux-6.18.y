@@ -13,7 +13,6 @@
 #include <linux/iommu.h>
 #include <linux/list.h>
 #include <linux/module.h>
-#include <linux/of_reserved_mem.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/overflow.h>
@@ -347,7 +346,6 @@ int meson_sc2_hw_create(struct device *dev, struct meson_sc2_hw **result)
 		goto free_hw;
 	}
 	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
-	of_reserved_mem_device_init(dev);
 	if (ret)
 		goto free_hw;
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "dos");
@@ -824,7 +822,6 @@ void meson_sc2_hw_destroy(struct meson_sc2_hw *hw)
 			   resource_size(&hw->dos_resource));
 	mutex_unlock(&hw->lock);
 	put_device(hw->dev);
-	of_reserved_mem_device_release(hw->dev);
 	kfree(hw);
 }
 

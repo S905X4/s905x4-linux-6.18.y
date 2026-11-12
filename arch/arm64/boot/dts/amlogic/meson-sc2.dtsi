@@ -131,17 +131,6 @@
 		#clock-cells = <0>;
 	};
 
-	tdmif_b: audio-controller-1 {
-		compatible = "amlogic,axg-tdm-iface";
-		#sound-dai-cells = <0>;
-		sound-name-prefix = "TDM_B";
-		clocks = <&clkc_audio AUD_CLKID_MST_B_SCLK>,
-			 <&clkc_audio AUD_CLKID_MST_B_LRCLK>,
-			 <&clkc_audio AUD_CLKID_MST_B_MCLK>;
-		clock-names = "sclk", "lrclk", "mclk";
-		status = "disabled";
-	};
-
 	tdmif_c: audio-controller-2 {
 		compatible = "amlogic,axg-tdm-iface";
 		#sound-dai-cells = <0>;
@@ -222,17 +211,6 @@
 				#address-cells = <0>;
 				amlogic,channel-interrupts =
 					<10 11 12 13 14 15 16 17 18 19 20 21>;
-			};
-
-			acodec: audio-controller@1a000 {
-				compatible = "amlogic,t9015";
-				reg = <0 0x1a000 0 0x14>;
-				#sound-dai-cells = <0>;
-				sound-name-prefix = "ACODEC";
-				clocks = <&clkc CLKID_ACODEC>;
-				clock-names = "pclk";
-				resets = <&reset RESET_ACODEC>;
-				status = "disabled";
 			};
 
 			mdio_mux: mdio-multiplexer@28000 {
@@ -530,20 +508,6 @@
 				status = "disabled";
 			};
 
-			tdmout_b: audio-controller@540 {
-				compatible = "amlogic,sc2-tdmout";
-				reg = <0 0x540 0 0x40>;
-				sound-name-prefix = "TDMOUT_B";
-				resets = <&clkc_audio AUD_RESET_TDMOUT_B>;
-				clocks = <&clkc_audio AUD_CLKID_TDMOUT_B>,
-					 <&clkc_audio AUD_CLKID_TDMOUT_B_SCLK>,
-					 <&clkc_audio AUD_CLKID_TDMOUT_B_SCLK_SEL>,
-					 <&clkc_audio AUD_CLKID_TDMOUT_B_LRCLK>,
-					 <&clkc_audio AUD_CLKID_TDMOUT_B_LRCLK>;
-				clock-names = "pclk", "sclk", "sclk_sel", "lrclk",
-					      "lrclk_sel";
-			};
-
 			tdmout_c: audio-controller@580 {
 				compatible = "amlogic,sc2-tdmout";
 				reg = <0 0x580 0 0x40>;
@@ -558,46 +522,11 @@
 					      "lrclk_sel";
 			};
 
-			toacodec: audio-controller@740 {
-				compatible = "amlogic,sc2-toacodec",
-					     "amlogic,g12a-toacodec";
-				reg = <0 0x740 0 4>;
-				#sound-dai-cells = <1>;
-				sound-name-prefix = "TOACODEC";
-				resets = <&clkc_audio AUD_RESET_TOACODEC>;
-				status = "disabled";
-			};
-
 			tohdmitx: audio-controller@744 {
 				compatible = "amlogic,sc2-tohdmitx";
 				reg = <0 0x744 0 4>;
 				#sound-dai-cells = <1>;
 				resets = <&clkc_audio AUD_RESET_TOHDMITX>;
-			};
-		};
-
-		bus@fe333000 {
-			compatible = "simple-bus";
-			reg = <0 0xfe333000 0 0x1000>;
-			#address-cells = <2>;
-			#size-cells = <2>;
-			ranges = <0 0 0 0xfe333000 0 0x1000>;
-
-			earc: audio-controller@800 {
-				compatible = "amlogic,meson-sc2-earc", "amlogic,tm2-revb-snd-earc";
-				reg = <0 0x800 0 0x400>,
-				      <0 0xc00 0 0x200>,
-				      <0 0xe00 0 0x200>;
-				reg-names = "rx_cmdc", "rx_dmac", "rx_top";
-				interrupts = <GIC_SPI 87 IRQ_TYPE_LEVEL_HIGH>;
-				interrupt-names = "earc_rx";
-				clocks = <&clkc_audio AUD_CLKID_EARCRX_CMDC>,
-					 <&clkc_audio AUD_CLKID_EARCRX_DMAC>,
-					 <&clkc CLKID_FCLK_DIV4>,
-					 <&clkc CLKID_FCLK_DIV4>;
-				clock-names = "rx_cmdc", "rx_dmac", "rx_cmdc_srcpll", "rx_dmac_srcpll";
-				#sound-dai-cells = <0>;
-				status = "disabled";
 			};
 		};
 
