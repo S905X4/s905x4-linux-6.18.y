@@ -68,13 +68,18 @@ static inline unsigned int meson_viu_mif_reg(struct meson_drm *priv,
 }
 
 static inline unsigned int meson_viu_afbc_reg(struct meson_drm *priv,
+					   unsigned int index,
 					   unsigned int reg)
 {
-	/* AFBC_ENABLE through AFBC_VD_CFMT_H have identical field order. */
-	return priv->sc2 ? SC2_AFBC_ENABLE + reg - AFBC_ENABLE : reg;
+	/* Both SC2 decoders have the same field order, not a shared bank. */
+	if (priv->sc2)
+		return (index ? SC2_VD2_AFBC_ENABLE : SC2_AFBC_ENABLE) +
+			reg - AFBC_ENABLE;
+	return reg;
 }
 
-void meson_viu_vd1_afbc_select(struct meson_drm *priv, bool afbc);
+void meson_viu_video_afbc_select(struct meson_drm *priv,
+				unsigned int index, bool afbc);
 
 /* OSDx_BLKx_CFG */
 #define OSD_MALI_SRC_EN		BIT(30)

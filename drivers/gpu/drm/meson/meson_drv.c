@@ -160,11 +160,13 @@ static void meson_vpu_init(struct meson_drm *priv)
 	if (priv->sc2) {
 		/* SC2 PWRCTRL memory gates, from Amlogic vpu_mem_pd_sc2. */
 		regmap_update_bits(priv->pwrctrl, 0x54,
-				   GENMASK(11, 0) | GENMASK(15, 14), 0);
+				   GENMASK(11, 0) | GENMASK(15, 14) |
+				   GENMASK(23, 22), 0);
 		regmap_update_bits(priv->pwrctrl, 0x58,
 				   GENMASK(21, 14) | GENMASK(25, 24) |
 				   GENMASK(31, 30), 0);
-		regmap_update_bits(priv->pwrctrl, 0x5c, GENMASK(13, 8), 0);
+		regmap_update_bits(priv->pwrctrl, 0x5c,
+				   GENMASK(13, 8) | GENMASK(17, 16), 0);
 		regmap_update_bits(priv->pwrctrl, 0x64, GENMASK(13, 12), 0);
 	}
 
@@ -216,6 +218,7 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 	struct drm_device *drm;
 	struct resource *res;
 	void __iomem *regs;
+	unsigned int video_canvases = 0;
 	int ret, i;
 
 	/* Checks if an output connector is available */
@@ -317,21 +320,19 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 	ret = meson_canvas_alloc(priv->canvas, &priv->canvas_id_osd1);
 	if (ret)
 		goto free_drm;
-	ret = meson_canvas_alloc(priv->canvas, &priv->canvas_id_vd1_0);
-	if (ret)
-		goto free_canvas_osd1;
-	ret = meson_canvas_alloc(priv->canvas, &priv->canvas_id_vd1_1);
-	if (ret)
-		goto free_canvas_vd1_0;
-	ret = meson_canvas_alloc(priv->canvas, &priv->canvas_id_vd1_2);
-	if (ret)
-		goto free_canvas_vd1_1;
+	for (i = 0; i < (priv->sc2 ? 6 : 3); i++) {
+		ret = meson_canvas_alloc(priv->canvas,
+					 &priv->canvas_id_vd[i / 3][i % 3]);
+		if (ret)
+			goto free_canvas_vd;
+		video_canvases++;
+	}
 
 	priv->vsync_irq = platform_get_irq(pdev, 0);
 
 	ret = drm_vblank_init(drm, 1);
 	if (ret)
-		goto free_canvas_vd1_2;
+		goto free_canvas_vd;
 
 	/* Assign limits per soc revision/package */
 	for (i = 0 ; i < ARRAY_SIZE(meson_drm_soc_attrs) ; ++i) {
@@ -347,11 +348,11 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 	 */
 	ret = aperture_remove_all_conflicting_devices(meson_driver.name);
 	if (ret)
-		goto free_canvas_vd1_2;
+		goto free_canvas_vd;
 
 	ret = drmm_mode_config_init(drm);
 	if (ret)
-		goto free_canvas_vd1_2;
+		goto free_canvas_vd;
 	drm->mode_config.max_width = 3840;
 	drm->mode_config.max_height = 2160;
 	drm->mode_config.funcs = &meson_mode_config_funcs;
@@ -366,7 +367,7 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 	if (priv->afbcd.ops) {
 		ret = priv->afbcd.ops->init(priv);
 		if (ret)
-			goto free_canvas_vd1_2;
+			goto free_canvas_vd;
 	}
 
 	/* Encoder Initialization */
@@ -430,13 +431,12 @@ uninstall_irq:
 exit_afbcd:
 	if (priv->afbcd.ops)
 		priv->afbcd.ops->exit(priv);
-free_canvas_vd1_2:
-	meson_canvas_free(priv->canvas, priv->canvas_id_vd1_2);
-free_canvas_vd1_1:
-	meson_canvas_free(priv->canvas, priv->canvas_id_vd1_1);
-free_canvas_vd1_0:
-	meson_canvas_free(priv->canvas, priv->canvas_id_vd1_0);
-free_canvas_osd1:
+free_canvas_vd:
+	while (video_canvases) {
+		video_canvases--;
+		meson_canvas_free(priv->canvas,
+			priv->canvas_id_vd[video_canvases / 3][video_canvases % 3]);
+	}
 	meson_canvas_free(priv->canvas, priv->canvas_id_osd1);
 free_drm:
 	drm_dev_put(drm);
@@ -461,17 +461,18 @@ static void meson_drv_unbind(struct device *dev)
 	struct meson_drm *priv = dev_get_drvdata(dev);
 	struct drm_device *drm = priv->drm;
 
-	if (priv->canvas) {
-		meson_canvas_free(priv->canvas, priv->canvas_id_osd1);
-		meson_canvas_free(priv->canvas, priv->canvas_id_vd1_0);
-		meson_canvas_free(priv->canvas, priv->canvas_id_vd1_1);
-		meson_canvas_free(priv->canvas, priv->canvas_id_vd1_2);
-	}
+	unsigned int i;
 
 	drm_dev_unregister(drm);
 	drm_kms_helper_poll_fini(drm);
 	drm_atomic_helper_shutdown(drm);
 	free_irq(priv->vsync_irq, drm);
+	if (priv->canvas) {
+		meson_canvas_free(priv->canvas, priv->canvas_id_osd1);
+		for (i = 0; i < (priv->sc2 ? 6 : 3); i++)
+			meson_canvas_free(priv->canvas,
+					  priv->canvas_id_vd[i / 3][i % 3]);
+	}
 	drm_dev_put(drm);
 
 	meson_encoder_dsi_remove(priv);

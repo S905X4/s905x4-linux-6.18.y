@@ -12,6 +12,52 @@
 #include "meson_registers.h"
 #include "meson_vpp.h"
 
+/* Amlogic video_reg.c pps_reg_array and vpp_blend_reg_array (SC2). */
+const struct meson_vpp_video_regs meson_vpp_video_regs[2] = {
+	{
+		.scale_coef_idx = VPP_SCALE_COEF_IDX,
+		.scale_coef = VPP_SCALE_COEF,
+		.vsc_region12_startp = VPP_VSC_REGION12_STARTP,
+		.vsc_region34_startp = VPP_VSC_REGION34_STARTP,
+		.vsc_region4_endp = VPP_VSC_REGION4_ENDP,
+		.vsc_start_phase_step = VPP_VSC_START_PHASE_STEP,
+		.vsc_phase_ctrl = VPP_VSC_PHASE_CTRL,
+		.vsc_ini_phase = VPP_VSC_INI_PHASE,
+		.hsc_region12_startp = VPP_HSC_REGION12_STARTP,
+		.hsc_region34_startp = VPP_HSC_REGION34_STARTP,
+		.hsc_region4_endp = VPP_HSC_REGION4_ENDP,
+		.hsc_start_phase_step = VPP_HSC_START_PHASE_STEP,
+		.hsc_region1_phase_slope = VPP_HSC_REGION1_PHASE_SLOPE,
+		.hsc_region3_phase_slope = VPP_HSC_REGION3_PHASE_SLOPE,
+		.hsc_phase_ctrl = VPP_HSC_PHASE_CTRL,
+		.sc_misc = VPP_SC_MISC,
+		.hsc_phase_ctrl1 = VPP_HSC_PHASE_CTRL1,
+		.postblend_h_start_end = VPP_POSTBLEND_VD1_H_START_END,
+		.postblend_v_start_end = VPP_POSTBLEND_VD1_V_START_END,
+	},
+	{
+		.scale_coef_idx = VD2_SCALE_COEF_IDX,
+		.scale_coef = VD2_SCALE_COEF,
+		.vsc_region12_startp = VD2_VSC_REGION12_STARTP,
+		.vsc_region34_startp = VD2_VSC_REGION34_STARTP,
+		.vsc_region4_endp = VD2_VSC_REGION4_ENDP,
+		.vsc_start_phase_step = VD2_VSC_START_PHASE_STEP,
+		.vsc_phase_ctrl = VD2_VSC_PHASE_CTRL,
+		.vsc_ini_phase = VD2_VSC_INI_PHASE,
+		.hsc_region12_startp = VD2_HSC_REGION12_STARTP,
+		.hsc_region34_startp = VD2_HSC_REGION34_STARTP,
+		.hsc_region4_endp = VD2_HSC_REGION4_ENDP,
+		.hsc_start_phase_step = VD2_HSC_START_PHASE_STEP,
+		.hsc_region1_phase_slope = VD2_HSC_REGION1_PHASE_SLOPE,
+		.hsc_region3_phase_slope = VD2_HSC_REGION3_PHASE_SLOPE,
+		.hsc_phase_ctrl = VD2_HSC_PHASE_CTRL,
+		.sc_misc = VD2_SC_MISC,
+		.hsc_phase_ctrl1 = VD2_HSC_PHASE_CTRL1,
+		.postblend_h_start_end = VPP_BLEND_VD2_H_START_END,
+		.postblend_v_start_end = VPP_BLEND_VD2_V_START_END,
+	},
+};
+
 /**
  * DOC: Video Post Processing
  *
@@ -76,16 +122,18 @@ static const uint32_t vpp_filter_coefs_bicubic[] = {
 };
 
 static void meson_vpp_write_vd_scaling_filter_coefs(struct meson_drm *priv,
+						    unsigned int index,
 						    const unsigned int *coefs,
 						    bool is_horizontal)
 {
+	const struct meson_vpp_video_regs *pps = &meson_vpp_video_regs[index];
 	int i;
 
 	writel_relaxed(is_horizontal ? VPP_SCALE_HORIZONTAL_COEF : 0,
-			priv->io_base + _REG(VPP_SCALE_COEF_IDX));
+			priv->io_base + _REG(pps->scale_coef_idx));
 	for (i = 0; i < 33; i++)
 		writel_relaxed(coefs[i],
-				priv->io_base + _REG(VPP_SCALE_COEF));
+				priv->io_base + _REG(pps->scale_coef));
 }
 
 void meson_vpp_init(struct meson_drm *priv)
@@ -158,8 +206,15 @@ void meson_vpp_init(struct meson_drm *priv)
 				vpp_filter_coefs_4point_bspline, true);
 
 	/* Write the VD proper filter coefficients. */
-	meson_vpp_write_vd_scaling_filter_coefs(priv, vpp_filter_coefs_bicubic,
+	meson_vpp_write_vd_scaling_filter_coefs(priv, 0, vpp_filter_coefs_bicubic,
 						false);
-	meson_vpp_write_vd_scaling_filter_coefs(priv, vpp_filter_coefs_bicubic,
+	meson_vpp_write_vd_scaling_filter_coefs(priv, 0, vpp_filter_coefs_bicubic,
 						true);
+	if (priv->sc2) {
+		writel_relaxed(0, priv->io_base + _REG(VD2_SC_MISC));
+		meson_vpp_write_vd_scaling_filter_coefs(priv, 1,
+						vpp_filter_coefs_bicubic, false);
+		meson_vpp_write_vd_scaling_filter_coefs(priv, 1,
+						vpp_filter_coefs_bicubic, true);
+	}
 }

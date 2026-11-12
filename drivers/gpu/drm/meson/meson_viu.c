@@ -411,11 +411,17 @@ void meson_viu_gxm_disable_osd1_afbc(struct meson_drm *priv)
 			    priv->io_base + _REG(VIU_MISC_CTRL1));
 }
 
-void meson_viu_vd1_afbc_select(struct meson_drm *priv, bool afbc)
+void meson_viu_video_afbc_select(struct meson_drm *priv,
+				unsigned int index, bool afbc)
 {
 	u32 mask = VD1_AXI_SEL_AFBC | AFBC_VD1_SEL;
 
-	if (priv->sc2) {
+	if (priv->sc2 && index) {
+		/* video_sink vdx_path_select: AFBC1 or VD2 MIF, never DI/OSD4. */
+		mask |= VD1_AFBC0_MEM_SEL;
+		writel_bits_relaxed(GENMASK(22, 0), afbc ? mask : 0,
+				    priv->io_base + _REG(VD2_AFBCD1_MISC_CTRL));
+	} else if (priv->sc2) {
 		/* TL1+ also selects the AFBC memory path with bit 22. */
 		mask |= VD1_AFBC0_MEM_SEL;
 		writel_bits_relaxed(mask, afbc ? mask : 0,
@@ -449,10 +455,14 @@ void meson_viu_init(struct meson_drm *priv)
 				priv->io_base + _REG(OSD1_HDR2_CTRL));
 
 		/* SC2 U-Boot leaves an RGB-to-YUV matrix on the YUV video path. */
-		if (priv->sc2)
+		if (priv->sc2) {
 			writel_bits_relaxed(VD1_HDR2_CTRL_REG_ONLY_MAT |
 					    VD1_HDR2_CTRL_TOP_EN, 0,
 					    priv->io_base + _REG(VD1_HDR2_CTRL));
+			writel_bits_relaxed(VD1_HDR2_CTRL_REG_ONLY_MAT |
+					    VD1_HDR2_CTRL_TOP_EN, 0,
+					    priv->io_base + _REG(VD2_HDR2_CTRL));
+		}
 	}
 
 	/* Initialize OSD1 fifo control register */
@@ -484,9 +494,17 @@ void meson_viu_init(struct meson_drm *priv)
 	writel_bits_relaxed(VIU_CTRL0_VD1_AFBC_MASK, 0,
 			    priv->io_base + _REG(VIU_MISC_CTRL0));
 	writel_relaxed(0, priv->io_base +
-		       _REG(meson_viu_afbc_reg(priv, AFBC_ENABLE)));
-	if (priv->sc2)
-		meson_viu_vd1_afbc_select(priv, false);
+		       _REG(meson_viu_afbc_reg(priv, 0, AFBC_ENABLE)));
+	if (priv->sc2) {
+		meson_viu_video_afbc_select(priv, 0, false);
+		meson_viu_video_afbc_select(priv, 1, false);
+		writel_relaxed(0, priv->io_base +
+			       _REG(meson_viu_afbc_reg(priv, 1, AFBC_ENABLE)));
+		writel_relaxed(0, priv->io_base +
+			       _REG(meson_viu_mif_reg(priv, VD1_IF0_GEN_REG)));
+		writel_relaxed(0, priv->io_base +
+			       _REG(meson_viu_mif_reg(priv, VD2_IF0_GEN_REG)));
+	}
 
 	writel_relaxed(0x00FF00C0,
 		       priv->io_base + _REG(priv->sc2 ?
