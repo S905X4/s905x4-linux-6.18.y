@@ -217,6 +217,7 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 	struct meson_drm *priv;
 	struct drm_device *drm;
 	struct resource *res;
+	struct regmap_config map_config = meson_regmap_config;
 	void __iomem *regs;
 	unsigned int video_canvases = 0;
 	int ret, i;
@@ -261,6 +262,8 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 		ret = -EINVAL;
 		goto free_drm;
 	}
+	map_config.name = priv->sc2 ? "clkctrl" : "hhi";
+	map_config.max_register = resource_size(res) - sizeof(u32);
 	/* Simply ioremap since it may be a shared register zone */
 	regs = devm_ioremap(dev, res->start, resource_size(res));
 	if (!regs) {
@@ -269,7 +272,7 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 	}
 
 	priv->hhi = devm_regmap_init_mmio(dev, regs,
-					  &meson_regmap_config);
+					  &map_config);
 	if (IS_ERR(priv->hhi)) {
 		dev_err(&pdev->dev, "Couldn't create the HHI regmap\n");
 		ret = PTR_ERR(priv->hhi);
@@ -288,13 +291,15 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 				ret = -EINVAL;
 				goto free_drm;
 			}
+			map_config.name = banks[i];
+			map_config.max_register = resource_size(res) - sizeof(u32);
 			regs = devm_ioremap(dev, res->start, resource_size(res));
 			if (!regs) {
 				ret = -ENOMEM;
 				goto free_drm;
 			}
 			*maps[i] = devm_regmap_init_mmio(dev, regs,
-							 &meson_regmap_config);
+							 &map_config);
 			if (IS_ERR(*maps[i])) {
 				ret = PTR_ERR(*maps[i]);
 				goto free_drm;
