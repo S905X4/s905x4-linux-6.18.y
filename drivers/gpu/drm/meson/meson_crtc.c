@@ -219,9 +219,9 @@ static void meson_crtc_sc2_osd_blend(struct meson_drm *priv)
 			       _REG(VIU_OSD_BLEND_DIN0_SCOPE_V + index * 2));
 	}
 	if (!bypass) {
-		/* BSP ABC: DIN0 is top, DIN2 middle, DIN3 bottom. */
+		/* DIN0 is below DIN2, which is below DIN3. */
 		control |= VIU_OSD_BLEND_BLEN2_PREMULT_EN(3) |
-			   VIU_OSD_BLEND_DIN_EN(5);
+			   VIU_OSD_BLEND_DIN_EN(5) | 0x4444;
 	} else {
 		/* Preserve the deployed single-OSD bypass path. */
 		control |= VIU_OSD_BLEND_BLEN2_PREMULT_EN(1) |
@@ -229,7 +229,7 @@ static void meson_crtc_sc2_osd_blend(struct meson_drm *priv)
 			   VIU_OSD_BLEND1_DIN3_BYPASS_TO_DOUT1 |
 			   VIU_OSD_BLEND1_DOUT_BYPASS_TO_BLEND2;
 	}
-	for (index = MESON_MAX_OSDS; index-- > 0;) {
+	for (index = 0; index < MESON_MAX_OSDS; index++) {
 		const struct meson_osd_state *osd = &priv->viu.osd[index];
 		unsigned int din;
 
@@ -237,6 +237,8 @@ static void meson_crtc_sc2_osd_blend(struct meson_drm *priv)
 			continue;
 		din = !input ? 0 : input == count - 1 ? 3 : 2;
 		input++;
+		/* Inactive DINs select OSD4 for the SC2 shift workaround. */
+		control &= ~(0xf << (din * 4));
 		control |= VIU_OSD_BLEND_REORDER(din, index + 1) |
 			   VIU_OSD_BLEND_DIN_EN(BIT(din));
 		/* BSP divides premultiplied pixels before blend0/1 multiplication. */
