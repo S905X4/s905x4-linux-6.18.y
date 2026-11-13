@@ -156,7 +156,8 @@ void meson_vpp_init(struct meson_drm *priv)
 	/* SC2 blends ten-bit YCbCr, including when only VD2 remains enabled. */
 	if (priv->sc2) {
 		writel_relaxed(0x04080200, priv->io_base + _REG(VPP_DUMMY_DATA));
-		writel_relaxed(0x008080, priv->io_base +
+		/* Packed eight-bit limited-range black, matching the OSD matrices. */
+		writel_relaxed(0x108080, priv->io_base +
 			       _REG(VPP_POST_BLEND_BLEND_DUMMY_DATA));
 		writel_relaxed(0x7fffffff, priv->io_base +
 			       _REG(VPP_POST_BLEND_DUMMY_ALPHA));

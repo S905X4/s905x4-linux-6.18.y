@@ -257,11 +257,11 @@ static void meson_crtc_sc2_osd_blend(struct meson_drm *priv)
 	writel_relaxed(size, priv->io_base + _REG(VIU_OSD_BLEND_BLEND1_SIZE));
 	writel_relaxed(control, priv->io_base + _REG(VIU_OSD_BLEND_CTRL));
 	writel_relaxed(bypass ? priv->viu.osd1_bypass_blend_ctrl1 :
-			BIT(0) | (3 << 4) | (3 << 16),
+			BIT(0) | (3 << 4) | BIT(12) | (3 << 16),
 			priv->io_base + _REG(VIU_OSD_BLEND_CTRL1));
+	/* DOUT is divided to straight alpha; VPP must multiply it once. */
 	writel_relaxed(OSD_BLEND_PATH_SEL_ENABLE |
-			(count ? OSD_BLEND_POSTBLD_SRC_OSD1 : 0) |
-			(count && !bypass ? VD_BLEND_POSTBLD_PREMULT_EN : 0),
+			(count ? OSD_BLEND_POSTBLD_SRC_OSD1 : 0),
 			priv->io_base + _REG(OSD1_BLEND_SRC_CTRL));
 	meson_crtc_sc2_output_scaler(priv, count != 0);
 }
