@@ -272,9 +272,9 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 
 	if (osd->afbcd) {
 		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
-			/* This is the internal decoding memory address */
+			/* SC2's 3840x2176x4 output needs a 32-MiB virtual slot. */
 			osd->blk1_cfg4 = MESON_G12A_AFBCD_OUT_ADDR *
-					(meson_plane->index + 1);
+				(1 + meson_plane->index * (priv->sc2 ? 2 : 1));
 			osd->blk0_cfg[0] |= OSD_ENDIANNESS_BE;
 			osd->ctrl_stat2 |= OSD_PENDING_STAT_CLEAN;
 			osd->ctrl_stat |= VIU_OSD1_CFG_SYN_EN;

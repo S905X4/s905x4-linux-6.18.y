@@ -383,7 +383,7 @@ static int meson_g12a_afbcd_setup_surface(struct meson_drm *priv,
 	meson_rdma_writel_sync(priv, 0, VPU_MAFBC_BOUNDING_BOX_Y_START_S0 + offset);
 	meson_rdma_writel_sync(priv, osd->height - 1,
 			       VPU_MAFBC_BOUNDING_BOX_Y_END_S0 + offset);
-	meson_rdma_writel_sync(priv, MESON_G12A_AFBCD_OUT_ADDR * (index + 1),
+	meson_rdma_writel_sync(priv, osd->blk1_cfg4,
 			       VPU_MAFBC_OUTPUT_BUF_ADDR_LOW_S0 + offset);
 	meson_rdma_writel_sync(priv, 0,
 			       VPU_MAFBC_OUTPUT_BUF_ADDR_HIGH_S0 + offset);
