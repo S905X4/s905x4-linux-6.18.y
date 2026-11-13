@@ -353,10 +353,14 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	hsc_ini_rpt_p0_num = (hf_bank_len / 2) - 1;
 	vsc_ini_rpt_p0_num = (vf_bank_len / 2) - 1;
 
+	/* Keep the shared PPS output paired with the helper-clipped input. */
+	if (priv->sc2)
+		dest = new_state->dst;
+
 	src_w = drm_rect_width(&new_state->src) >> 16;
 	src_h = drm_rect_height(&new_state->src) >> 16;
-	dst_w = new_state->crtc_w;
-	dst_h = new_state->crtc_h;
+	dst_w = drm_rect_width(&dest);
+	dst_h = drm_rect_height(&dest);
 	if (meson_plane->index) {
 		meson_plane_blend_size(priv, state, crtc_state, &blend_w, &blend_h);
 		dest = meson_plane_blend_dest(new_state, crtc_state, blend_w, blend_h);
