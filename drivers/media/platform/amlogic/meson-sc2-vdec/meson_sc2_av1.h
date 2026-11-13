@@ -692,10 +692,11 @@ static int sc2_av1_validate(struct meson_sc2_hevc_context *ctx,
                      V4L2_AV1_SEQUENCE_FLAG_SUBSAMPLING_Y)) !=
                     (V4L2_AV1_SEQUENCE_FLAG_SUBSAMPLING_X |
                      V4L2_AV1_SEQUENCE_FLAG_SUBSAMPLING_Y) ||
-        (f->flags & V4L2_AV1_FRAME_FLAG_BUFFER_REMOVAL_TIME_PRESENT) ||
         f->tile_info.tile_cols > 64 ||
         f->tile_info.tile_rows > 64 || job->syntax->num_tiles > 256)
         return -EOPNOTSUPP;
+    /* The canonical reconstruction stream has no decoder model. Source
+     * removal ticks are metadata, not reference-buffer or presentation PTS. */
     /* Intra MC entries already bind this picture, as in SC2 config_mc_buffer.
      * Canonical syntax validates screen-tools/no-superres and no-filter rules. */
     /* Index zero is not an inter reference. Models 1..7 are checked by the

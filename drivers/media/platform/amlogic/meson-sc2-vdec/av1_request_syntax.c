@@ -178,6 +178,8 @@ static void sequence_header(struct av1_bits *b, struct av1_syntax *s)
 	put(b, 3, 0);
 	put(b, 1, SF(s, STILL_PICTURE));
 	put(b, 1, 0); /* full header, including for reduced-still inputs */
+	/* Reconstruction is request-scheduled. Omit source decoder-model timing;
+	 * userspace retains its original presentation timestamps independently. */
 	put(b, 1, 0); /* timing_info_present_flag */
 	put(b, 1, 0); /* initial_display_delay_present_flag */
 	put(b, 5, 0); /* one unfiltered operating point */
