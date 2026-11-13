@@ -283,6 +283,7 @@ struct mpeg12_multi {
 	struct mutex lock;
 	struct list_head preroll;
 	u32 input_refs;
+	u32 first_end;
 	void *workspace;
 	dma_addr_t workspace_dma;
 	void *cc;
@@ -538,6 +539,14 @@ static int mpeg12_multi_run(struct amvdec_session *sess)
 	if (!m->ready || m->running || m->terminal ||
 	    (!m->swap_valid && !m->committed) ||
 	    (m->empty && m->job_end == m->committed))
+		return 0;
+	/* The MULTI firmware completes a picture only at the next start code.
+	 * A cold launch with just AU0 ends in DATA_EMPTY mid-picture, and every
+	 * cold replay from offset 0 then skips the leading sequence header until
+	 * the next one. Hold the first launch for a following unit or EOS.
+	 */
+	if (!m->swap_valid && !m->job_end && !m->eos_queued &&
+	    m->committed == m->first_end)
 		return 0;
 	for (i = 0; i < MPEG12_MULTI_BUFFERS; i++) {
 		if (i != m->refs[0] && i != m->refs[1] &&
@@ -989,6 +998,8 @@ static void mpeg12_multi_input_committed(struct amvdec_session *sess,
 
 	mutex_lock(&m->lock);
 	m->committed = offset + bytes;
+	if (!m->first_end)
+		m->first_end = m->committed;
 	ret = mpeg12_multi_run(sess);
 	if (ret)
 		m->error = ret;
