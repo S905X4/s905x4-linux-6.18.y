@@ -165,6 +165,8 @@ static struct clk_regmap sc2_fixed_pll_dco = {
 			.shift   = 0,
 			.width   = 19,
 		},
+		/* SC2's 19-bit field has a 17-bit fractional denominator. */
+		.frac_max = BIT(17),
 		.l = {
 			.reg_off = ANACTRL_FIXPLL_CTRL0,
 			.shift   = 31,
