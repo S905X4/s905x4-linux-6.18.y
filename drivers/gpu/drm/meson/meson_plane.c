@@ -150,8 +150,13 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	int hf_bank_len;
 	int vf_bank_len;
 	u8 canvas_id_osd1;
+	u32 global_alpha = 0x100;
 	bool sc2_interlace = priv->sc2 &&
 		(new_state->crtc->mode.flags & DRM_MODE_FLAG_INTERLACE);
+
+	if (priv->sc2)
+		global_alpha = DIV_ROUND_CLOSEST(new_state->alpha * 0x100,
+					       DRM_BLEND_ALPHA_OPAQUE);
 
 	/*
 	 * Update Coordinates
@@ -169,9 +174,9 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	else
 		priv->viu.osd1_afbcd = false;
 
-	/* Enable OSD and BLK0, set max global alpha */
+	/* SC2 exposes the OSD's nine-bit global alpha through atomic state. */
 	priv->viu.osd1_ctrl_stat = OSD_ENABLE |
-				   (0x100 << OSD_GLOBAL_ALPHA_SHIFT) |
+				   (global_alpha << OSD_GLOBAL_ALPHA_SHIFT) |
 				   OSD_BLK0_ENABLE;
 
 	priv->viu.osd1_ctrl_stat2 = readl(priv->io_base +
@@ -590,6 +595,11 @@ int meson_plane_create(struct meson_drm *priv)
 	}
 
 	drm_plane_helper_add(plane, &meson_plane_helper_funcs);
+	if (priv->sc2) {
+		ret = drm_plane_create_alpha_property(plane);
+		if (ret)
+			return ret;
+	}
 
 	/* For now, OSD Primary plane is always on the front */
 	drm_plane_create_zpos_immutable_property(plane, priv->sc2 ? 2 : 1);
