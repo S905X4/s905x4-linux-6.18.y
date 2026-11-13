@@ -529,6 +529,7 @@ static int mpeg12_multi_run(struct amvdec_session *sess)
 	struct mpeg12_multi *m = sess->priv;
 	struct amvdec_core *core = sess->core;
 	u32 rp, size, fifo = 0;
+	bool restored = m->swap_valid;
 	unsigned int i;
 	int ret, index = -1;
 
@@ -552,12 +553,13 @@ static int mpeg12_multi_run(struct amvdec_session *sess)
 	if (ret)
 		return ret;
 	amvdec_write_dos_bits(core, POWER_CTL_VLD, BIT(4));
-	if (m->swap_valid) {
+	if (restored) {
 		ret = mpeg12_multi_swap(sess, false);
 		if (ret)
 			return ret;
 		/* Snapshot the restored reservoir BEFORE CONTROL/WP can refill it. */
 		fifo = amvdec_read_dos(core, VLD_MEM_VIFIFO_LEVEL);
+		rp = amvdec_read_dos(core, VLD_MEM_VIFIFO_RP);
 	} else {
 		amvdec_write_dos(core, VLD_MEM_VIFIFO_START_PTR, sess->vififo_paddr);
 		amvdec_write_dos(core, VLD_MEM_VIFIFO_END_PTR,
@@ -568,9 +570,15 @@ static int mpeg12_multi_run(struct amvdec_session *sess)
 		amvdec_write_dos(core, VLD_MEM_VIFIFO_BUF_CNTL, MEM_BUFCTRL_MANUAL);
 		amvdec_write_dos(core, VLD_MEM_VIFIFO_RP, sess->vififo_paddr);
 	}
-	rp = amvdec_read_dos(core, VLD_MEM_VIFIFO_RP);
 	amvdec_write_dos(core, VLD_MEM_VIFIFO_WP,
 			 sess->vififo_paddr + sess->stream_write);
+	if (!restored) {
+		/* Load the programmed cold RP/WP before enabling input again. */
+		amvdec_write_dos(core, VLD_MEM_VIFIFO_BUF_CNTL,
+				 MEM_BUFCTRL_MANUAL | 1);
+		amvdec_write_dos(core, VLD_MEM_VIFIFO_BUF_CNTL, MEM_BUFCTRL_MANUAL);
+		rp = amvdec_read_dos(core, VLD_MEM_VIFIFO_RP);
+	}
 	amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL,
 			 (0x11 << 16) | BIT(10) | (7 << 3));
 	/* rp and fifo describe the same pre-refill restored checkpoint. */
