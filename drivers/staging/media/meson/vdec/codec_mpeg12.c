@@ -267,6 +267,8 @@ struct mpeg12_multi_picture {
 	u32 flags;
 	u32 field;
 	u32 packet_offset;
+	u32 width;
+	u32 height;
 	bool pending;
 	bool displayed;
 	bool packet_done;
@@ -279,9 +281,19 @@ struct mpeg12_multi_preroll {
 	u32 type;
 };
 
+struct mpeg12_multi_format {
+	struct list_head list;
+	u32 offset;
+	u32 width;
+	u32 height;
+};
+
 struct mpeg12_multi {
 	struct mutex lock;
 	struct list_head preroll;
+	struct list_head formats;
+	u32 input_width;
+	u32 input_height;
 	u32 input_refs;
 	u32 first_end;
 	void *workspace;
@@ -306,6 +318,8 @@ struct mpeg12_multi {
 	u32 decoded;
 	u32 pending;
 	u32 eos_start;
+	int source_display;
+	bool source_last;
 	bool ready;
 	bool running;
 	bool context_valid;
@@ -316,6 +330,8 @@ struct mpeg12_multi {
 };
 
 static int mpeg12_multi_run(struct amvdec_session *sess);
+static int mpeg12_multi_picture_format(struct mpeg12_multi *m,
+				       struct mpeg12_multi_picture *pic);
 
 static int mpeg12_multi_pause(struct amvdec_session *sess)
 {
@@ -465,6 +481,37 @@ static int mpeg12_multi_retire_preroll(struct amvdec_session *sess,
 	return ret;
 }
 
+/* Called only after a completed picture paused the processor. A boundary
+ * buffer never aliases a reference, an unpresented picture or a held export.
+ */
+static int mpeg12_multi_source_boundary(struct amvdec_session *sess)
+{
+	struct mpeg12_multi *m = sess->priv;
+	struct vb2_v4l2_buffer *vb;
+	unsigned int i;
+
+	if (m->source_last)
+		return 0;
+	for (i = 0; i < MPEG12_MULTI_BUFFERS; i++) {
+		if (i == m->active || i == m->refs[0] || i == m->refs[1] ||
+		    m->picture[i].pending || m->picture[i].displayed)
+			continue;
+		vb = v4l2_m2m_dst_buf_remove_by_idx(sess->m2m_ctx,
+						    sess->fw_idx_to_vb2_idx[i]);
+		if (!vb)
+			continue;
+		vb2_set_plane_payload(&vb->vb2_buf, 0, 0);
+		vb2_set_plane_payload(&vb->vb2_buf, 1, 0);
+		vb->flags = V4L2_BUF_FLAG_LAST;
+		vb->sequence = sess->sequence_cap;
+		m->picture[i].displayed = true;
+		m->source_last = true;
+		v4l2_m2m_buf_done(vb, VB2_BUF_STATE_DONE);
+		return 0;
+	}
+	return 0;
+}
+
 static int mpeg12_multi_present(struct amvdec_session *sess, int index)
 {
 	struct mpeg12_multi *m = sess->priv;
@@ -477,6 +524,25 @@ static int mpeg12_multi_present(struct amvdec_session *sess, int index)
 	pic = &m->picture[index];
 	if (!pic->pending || pic->displayed || !m->pending)
 		return -EPROTO;
+	if (pic->width != sess->width || pic->height != sess->height) {
+		const struct v4l2_event ev = {
+			.type = V4L2_EVENT_SOURCE_CHANGE,
+			.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION,
+		};
+
+		/* The next presentation belongs to the new geometry. Everything
+		 * already queued before LAST retains the old geometry at the client.
+		 */
+		m->source_display = index;
+		m->source_last = false;
+		WRITE_ONCE(sess->source_change_pending, true);
+		sess->width = pic->width;
+		sess->height = pic->height;
+		sess->visible_width = pic->width;
+		sess->visible_height = pic->height;
+		v4l2_event_queue_fh(&sess->fh, &ev);
+		return mpeg12_multi_source_boundary(sess);
+	}
 	vb = v4l2_m2m_dst_buf_remove_by_idx(sess->m2m_ctx,
 					 sess->fw_idx_to_vb2_idx[index]);
 	if (!vb)
@@ -505,10 +571,6 @@ static int mpeg12_multi_dimensions(struct amvdec_session *sess)
 	struct mpeg12_multi *m = sess->priv;
 	u32 width = amvdec_read_dos(sess->core, MREG_PIC_WIDTH);
 	u32 height = amvdec_read_dos(sess->core, MREG_PIC_HEIGHT);
-	const struct v4l2_event ev = {
-		.type = V4L2_EVENT_SOURCE_CHANGE,
-		.u.src_change.changes = V4L2_EVENT_SRC_CH_RESOLUTION,
-	};
 
 	if (!width || !height || width > sess->fmt_out->max_width ||
 	    height > sess->fmt_out->max_height ||
@@ -516,13 +578,6 @@ static int mpeg12_multi_dimensions(struct amvdec_session *sess)
 		return -EINVAL;
 	m->width = width;
 	m->height = height;
-	if (width != sess->width || height != sess->height) {
-		sess->width = width;
-		sess->height = height;
-		sess->visible_width = width;
-		sess->visible_height = height;
-		v4l2_event_queue_fh(&sess->fh, &ev);
-	}
 	return 0;
 }
 
@@ -537,6 +592,8 @@ static int mpeg12_multi_run(struct amvdec_session *sess)
 
 	if (m->error)
 		return m->error;
+	if (sess->source_change_pending)
+		return mpeg12_multi_source_boundary(sess);
 	if (!m->ready || m->running || m->terminal ||
 	    (!m->swap_valid && !m->committed) ||
 	    (m->empty && m->job_end == m->committed))
@@ -680,6 +737,9 @@ static int mpeg12_multi_picture_done(struct amvdec_session *sess, u32 status)
 		return ret;
 	pic = &m->picture[index];
 	ret = mpeg12_multi_timestamp(sess, pic, offset);
+	if (ret)
+		return ret;
+	ret = mpeg12_multi_picture_format(m, pic);
 	if (ret)
 		return ret;
 	/* A real PIC_DONE with parser damage is recoverable, not a queue
@@ -853,6 +913,33 @@ unlock:
 	return IRQ_HANDLED;
 }
 
+/* MPEG completion can follow parser lookahead into the next sequence. Bind
+ * geometry through the same exact input packet as PTS, not live registers.
+ * Retain only the current sequence interval and future admitted changes.
+ */
+static int mpeg12_multi_picture_format(struct mpeg12_multi *m,
+				       struct mpeg12_multi_picture *pic)
+{
+	struct mpeg12_multi_format *f, *next;
+
+	if (list_empty(&m->formats))
+		return -EPROTO;
+	f = list_first_entry(&m->formats, struct mpeg12_multi_format, list);
+	if ((s32)(pic->packet_offset - f->offset) < 0)
+		return -EPROTO;
+	while (!list_is_last(&f->list, &m->formats)) {
+		next = list_next_entry(f, list);
+		if ((s32)(pic->packet_offset - next->offset) < 0)
+			break;
+		list_del(&f->list);
+		kfree(f);
+		f = next;
+	}
+	pic->width = f->width;
+	pic->height = f->height;
+	return 0;
+}
+
 /* Track source coded order, not asynchronous decoder progress. Once two IP
  * references have been submitted there are no startup packets left to mark.
  * This only classifies complete packet headers; it never changes payloads or
@@ -866,6 +953,7 @@ static int mpeg12_multi_prepare_input(struct amvdec_session *sess,
 	struct mpeg12_multi_preroll *p;
 	const u8 *data = vb2_plane_vaddr(&vbuf->vb2_buf, 0);
 	u32 code = U32_MAX, type = 0, pictures = 0, i;
+	u32 width, height;
 	bool slice = false, header = false;
 	int ret = 0;
 
@@ -873,13 +961,21 @@ static int mpeg12_multi_prepare_input(struct amvdec_session *sess,
 		return -EFAULT;
 
 	mutex_lock(&m->lock);
-	if (m->input_refs >= 2)
-		goto unlock;
+	width = m->input_width;
+	height = m->input_height;
 	for (i = 0; i < *payload_size; i++) {
 		code = (code << 8) | data[i];
 		if ((code & 0xffffff00) != 0x100)
 			continue;
-		if (!(code & 0xff)) {
+		if (code == 0x1b3 && !pictures && *payload_size - i > 3) {
+			width = (data[i + 1] << 4) | (data[i + 2] >> 4);
+			height = ((data[i + 2] & 15) << 8) | data[i + 3];
+		} else if (code == 0x1b5 && !pictures &&
+			   *payload_size - i > 3 && data[i + 1] >> 4 == 1) {
+			width = (width & 0xfff) |
+				(((data[i + 2] & 1) << 1 | data[i + 3] >> 7) << 12);
+			height = (height & 0xfff) | ((data[i + 3] >> 5 & 3) << 12);
+		} else if (!(code & 0xff)) {
 			pictures++;
 			if (*payload_size - i > 2) {
 				type = (data[i + 2] >> 3) & 7;
@@ -887,8 +983,28 @@ static int mpeg12_multi_prepare_input(struct amvdec_session *sess,
 			}
 		} else if ((code & 0xff) <= 0xaf && pictures) {
 			slice = true;
+			if (m->input_refs >= 2)
+				break;
 		}
 	}
+	if (width && height && width <= sess->fmt_out->max_width &&
+	    height <= sess->fmt_out->max_height &&
+	    (width != m->input_width || height != m->input_height)) {
+		struct mpeg12_multi_format *f = kmalloc(sizeof(*f), GFP_KERNEL);
+
+		if (!f) {
+			ret = -ENOMEM;
+			goto unlock;
+		}
+		f->offset = sess->stream_offset;
+		f->width = width;
+		f->height = height;
+		list_add_tail(&f->list, &m->formats);
+		m->input_width = width;
+		m->input_height = height;
+	}
+	if (m->input_refs >= 2)
+		goto unlock;
 	if (pictures != 1 || !header || !slice || type < 1 || type > 3)
 		goto unlock;
 	if (type == 1 || (type == 2 && m->input_refs)) {
@@ -923,6 +1039,7 @@ static int mpeg12_multi_start(struct amvdec_session *sess)
 		return -ENOMEM;
 	mutex_init(&m->lock);
 	INIT_LIST_HEAD(&m->preroll);
+	INIT_LIST_HEAD(&m->formats);
 	m->refs[0] = -1;
 	m->refs[1] = -1;
 	m->active = -1;
@@ -955,12 +1072,17 @@ static int mpeg12_multi_stop(struct amvdec_session *sess)
 {
 	struct mpeg12_multi *m = sess->priv;
 	struct mpeg12_multi_preroll *p, *next;
+	struct mpeg12_multi_format *f, *next_format;
 	struct device *dev = sess->core->dev;
 
 	/* vdec_1_sc2_stop has disabled IRQs and proved processor/DMC DMA idle. */
 	list_for_each_entry_safe(p, next, &m->preroll, list) {
 		list_del(&p->list);
 		kfree(p);
+	}
+	list_for_each_entry_safe(f, next_format, &m->formats, list) {
+		list_del(&f->list);
+		kfree(f);
 	}
 	dma_free_coherent(dev, PAGE_SIZE, m->swap, m->swap_dma);
 	dma_free_coherent(dev, MPEG12_MULTI_CC_SIZE, m->cc, m->cc_dma);
@@ -976,6 +1098,16 @@ static void mpeg12_multi_resume(struct amvdec_session *sess)
 	int ret = 0;
 
 	mutex_lock(&m->lock);
+	if (sess->source_change_pending) {
+		if (!m->source_last) {
+			ret = -EPROTO;
+			goto unlock;
+		}
+		WRITE_ONCE(sess->source_change_pending, false);
+		ret = mpeg12_multi_present(sess, m->source_display);
+		if (ret)
+			goto unlock;
+	}
 	if (!m->ready) {
 		if (sess->num_dst_bufs != MPEG12_MULTI_BUFFERS ||
 		    (sess->pixfmt_cap != V4L2_PIX_FMT_NV12M &&
@@ -1064,6 +1196,8 @@ static int mpeg12_multi_drain_step(struct amvdec_session *sess)
 		ret = m->error;
 		goto unlock;
 	}
+	if (sess->source_change_pending)
+		goto unlock;
 	if (!m->eos_queued) {
 		m->eos_start = sess->stream_offset;
 		ret = esparser_queue_eos(sess->core, eos_sequence,
@@ -1090,7 +1224,7 @@ static int mpeg12_multi_drain_step(struct amvdec_session *sess)
 	index = m->refs[1];
 	if (index >= 0 && m->picture[index].pending) {
 		ret = mpeg12_multi_present(sess, index);
-		if (ret)
+		if (ret || sess->source_change_pending)
 			goto unlock;
 	}
 	m->refs[0] = -1;

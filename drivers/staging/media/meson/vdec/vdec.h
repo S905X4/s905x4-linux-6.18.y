@@ -244,6 +244,7 @@ enum amvdec_status {
  * @keyframe_found: flag set once a keyframe has been parsed
  * @num_dst_bufs: number of destination buffers
  * @changed_format: the format changed
+ * @source_change_pending: completed old geometry awaits LAST/START handshake
  * @canvas_alloc: array of all the canvas IDs allocated
  * @canvas_num: number of canvas IDs allocated
  * @vififo_vaddr: virtual address for the VIFIFO
@@ -313,6 +314,7 @@ struct amvdec_session {
 	unsigned int keyframe_found;
 	unsigned int num_dst_bufs;
 	unsigned int changed_format;
+	bool source_change_pending;
 
 	u8 canvas_alloc[MAX_CANVAS];
 	u32 canvas_num;

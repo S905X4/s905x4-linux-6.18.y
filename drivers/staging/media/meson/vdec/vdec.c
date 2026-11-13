@@ -329,6 +329,7 @@ static void vdec_reset_decode_state(struct amvdec_session *sess)
 	sess->should_stop = 0;
 	sess->aborted = false;
 	sess->eos_completed = false;
+	sess->source_change_pending = false;
 	sess->keyframe_found = 0;
 	sess->last_offset = 0;
 	sess->wrap_count = 0;
@@ -859,6 +860,11 @@ static void vdec_sc2_eos_work(struct work_struct *work)
 		sess->draining = false;
 		goto unlock;
 	}
+	/* A resolution handshake may be held by the consumer. Its LAST is not
+	 * terminal EOS and must not consume the explicit drain deadline.
+	 */
+	if (READ_ONCE(sess->source_change_pending))
+		goto unlock_retry;
 	if (time_after_eq(jiffies, sess->drain_deadline)) {
 		amvdec_abort(sess);
 		sess->draining = false;
@@ -1029,6 +1035,20 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 		return 0;
 
 	if (cmd->cmd == V4L2_DEC_CMD_START) {
+		if (READ_ONCE(sess->source_change_pending)) {
+			struct vb2_queue *cap = v4l2_m2m_get_dst_vq(sess->m2m_ctx);
+
+			if (!cap->last_buffer_dequeued)
+				return -EBUSY;
+			vb2_clear_last_buffer_dequeued(cap);
+			codec_ops->resume(sess);
+			if (sess->aborted)
+				return -EIO;
+			if (sess->draining)
+				sess->drain_deadline = jiffies + msecs_to_jiffies(5000);
+			schedule_work(&sess->esparser_queue_work);
+			return 0;
+		}
 		if (sess->draining)
 			return -EBUSY;
 		if (sess->core->platform->revision == VDEC_REVISION_SC2 &&
