@@ -183,8 +183,9 @@ static void meson_crtc_sc2_output_scaler(struct meson_drm *priv, bool enabled)
 	/* Without a primary FB, the composition domain is the full mode. */
 	writel_relaxed(interlace ? 2 << 24 : 0, priv->io_base + _REG(base));
 	writel_relaxed(interlace ? 0x80008000 : 0, priv->io_base + _REG(base + 1));
+	/* A 2:1 phase wraps once, so OSD1's bottom repeat count is zero. */
 	writel_relaxed(interlace ? BIT(25) | BIT(24) | BIT(23) |
-			(1 << 16) | (4 << 11) | (1 << 8) | (4 << 3) | 4 : 0,
+			(4 << 11) | (1 << 8) | (4 << 3) | 4 : 0,
 			priv->io_base + _REG(base + 2));
 	writel_relaxed(0, priv->io_base + _REG(base + 3));
 	writel_relaxed(0, priv->io_base + _REG(base + 4));
