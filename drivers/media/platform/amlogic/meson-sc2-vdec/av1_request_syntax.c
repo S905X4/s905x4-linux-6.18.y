@@ -607,6 +607,9 @@ static void global_param(struct av1_bits *b, struct av1_syntax *s,
 {
 	unsigned int abs_bits = 12, precision = 15;
 	int identity = index % 3 == 2 ? 65536 : 0;
+	/* Keep the true primary's predictor: the backend retains firmware GMC
+	 * state with the same completed physical picture as this frame snapshot.
+	 * Parser restart is not a reason to recenter against identity. */
 	s32 previous = s->primary ? s->primary->global_motion.params[ref][index] : identity;
 	s64 current = s->r->frame->global_motion.params[ref][index];
 	s64 predictor;

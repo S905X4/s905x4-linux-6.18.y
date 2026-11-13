@@ -8,7 +8,7 @@
 #define AV1_MMU_DMA_CTRL (0x363e * 4)
 #define A8_PHYSICAL_SLOTS 16
 /* Page-aligned capacities from vav1.c aom_workbuff_spec[1] (4096x2304).
- * Only the board's 3840x2160 envelope is advertised. CDF and segmentation
+ * Only the board's 3840x2160 envelope is advertised. CDF, GMC and segmentation
  * remain per physical slot across parser resets and dependent pictures.
  */
 #define AV1_WORK_SIZE 0x510000
@@ -504,6 +504,9 @@ static void sc2_av1_parser(struct meson_sc2_hevc_context *ctx,
     sc2_write(hw, HEVC_ASSIST_SCRATCH_1, lower_32_bits(st->work_dma + AV1_RPM));
     sc2_write(hw, HEVC_ASSIST_SCRATCH_I, lower_32_bits(st->work_dma + AV1_LMEM));
     sc2_write(hw, HEVC_ASSIST_SCRATCH_5, av1_workspace(st, DAALA));
+    /* vav1 keeps this external store/load allocation across run_front() core
+     * resets. Its contents are firmware-private, produced from canonical OBUs;
+     * never seed coefficients or clear it between dependent pictures. */
     sc2_write(hw, AV1_GMC_PARAM_BUFF_ADDR, av1_workspace(st, GMC));
     sc2_write(hw, HEVCD_IPP_LINEBUFF_BASE, av1_workspace(st, IPP));
     sc2_write(hw, HEVC_DBLK_CFG4, av1_workspace(st, DBLK_PARA));
@@ -694,11 +697,10 @@ static int sc2_av1_validate(struct meson_sc2_hevc_context *ctx,
         f->tile_info.tile_cols > 64 ||
         f->tile_info.tile_rows > 64 || job->syntax->num_tiles > 256)
         return -EOPNOTSUPP;
-    /* A fresh parser has no implicit previous global-motion predictor bank.
-     * Reject nonidentity models instead of silently losing that authority. */
-    for (i = 0; i < 8; i++)
-        if (f->global_motion.type[i] != V4L2_AV1_WARP_MODEL_IDENTITY)
-            return -EOPNOTSUPP;
+    /* Index zero is not an inter reference. Models 1..7 are checked by the
+     * serializer and decoded into the context-owned opaque GMC workspace. */
+    if (f->global_motion.type[0] != V4L2_AV1_WARP_MODEL_IDENTITY)
+        return -EOPNOTSUPP;
     if (!owner || (owner->context && owner->context != ctx) ||
         owner->surface.width != f->upscaled_width || owner->surface.height != height ||
         owner->surface.depth != s->bit_depth || owner->surface.mv_size < SZ_1M ||
@@ -808,8 +810,9 @@ static int sc2_av1_validate(struct meson_sc2_hevc_context *ctx,
     st->sequence[9] = st->order_bits ? st->order_bits - 1 : 0;
     job->syntax->references = st->snapshots;
     job->syntax->num_references = 8;
-    /* Each invocation starts a fresh parser; external CDF/segment history is
-     * explicitly rebound, never zeroed between dependent pictures. */
+    /* Each invocation starts a fresh parser. External CDF/segment/GMC history
+     * survives it; logical refs and true-primary/current physical indices are
+     * rebound explicitly. Only completed pictures can supply that history. */
     job->syntax->emit_sequence_header = true;
     return 0;
 }
