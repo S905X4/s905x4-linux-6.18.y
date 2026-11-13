@@ -82,6 +82,10 @@ int meson_sc2_modern_fbc_bind(struct meson_sc2_hevc_context *context,
 int meson_sc2_av1_surface_alloc(struct meson_sc2_hw *hw,
 			       struct meson_sc2_surface *surface,
 			       u32 width, u32 height);
+int meson_sc2_av1_fbc_bind(struct meson_sc2_hevc_context *context,
+			  struct meson_sc2_surface *surface,
+			  u32 width, u32 height, void *cpu, dma_addr_t dma,
+			  size_t size, struct dma_buf *buffer);
 void meson_sc2_surface_free(struct meson_sc2_hw *hw,
 			   struct meson_sc2_surface *surface);
 /* Blocking, called only by the frontend's serialized work item. Each job

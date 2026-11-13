@@ -92,8 +92,7 @@ static struct v4l2_pix_format_mplane *sc2_format(struct sc2_ctx *ctx,
 static void sc2_capture_format(struct sc2_ctx *ctx,
 			       struct v4l2_pix_format_mplane *pix)
 {
-	bool fbc = pix->pixelformat == V4L2_PIX_FMT_AMLOGIC_FBC10 &&
-		   ctx->source_fmt.pixelformat == V4L2_PIX_FMT_HEVC_SLICE;
+	bool fbc = pix->pixelformat == V4L2_PIX_FMT_AMLOGIC_FBC10;
 
 	pix->pixelformat = fbc ? V4L2_PIX_FMT_AMLOGIC_FBC10 :
 		pix->pixelformat == V4L2_PIX_FMT_NV21 ? V4L2_PIX_FMT_NV21 :
@@ -135,8 +134,8 @@ static int sc2_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
 	pix->width = clamp_t(u32, ALIGN(pix->width, 2), 64, SC2_MAX_WIDTH);
 	pix->height = clamp_t(u32, ALIGN(pix->height, 2), 64, SC2_MAX_HEIGHT);
 	if (pix->pixelformat == V4L2_PIX_FMT_AV1_FRAME) {
-		pix->width = min(pix->width, 1920U);
-		pix->height = min(pix->height, 1088U);
+		pix->width = min(pix->width, 3840U);
+		pix->height = min(pix->height, 2160U);
 	}
 	pix->field = V4L2_FIELD_NONE;
 	pix->num_planes = 1;
@@ -183,8 +182,7 @@ static int sc2_enum_fmt(struct file *file, void *priv, struct v4l2_fmtdesc *f)
 {
 	struct sc2_ctx *ctx = sc2_file_ctx(file);
 	bool output = V4L2_TYPE_IS_OUTPUT(f->type);
-	bool hevc = ctx->source_fmt.pixelformat == V4L2_PIX_FMT_HEVC_SLICE;
-	unsigned int last = !output && hevc ? 2 : 1;
+	unsigned int last = output ? 1 : 2;
 
 	if (f->index > last)
 		return -EINVAL;
@@ -194,7 +192,7 @@ static int sc2_enum_fmt(struct file *file, void *priv, struct v4l2_fmtdesc *f)
 	} else {
 		if (!f->index)
 			f->pixelformat = V4L2_PIX_FMT_NV12;
-		else if (f->index == 1 && hevc)
+		else if (f->index == 1)
 			f->pixelformat = V4L2_PIX_FMT_AMLOGIC_FBC10;
 		else
 			f->pixelformat = V4L2_PIX_FMT_NV21;
@@ -214,13 +212,13 @@ static int sc2_enum_framesizes(struct file *file, void *priv,
 	f->type = V4L2_FRMSIZE_TYPE_STEPWISE;
 	f->stepwise.min_width = 64;
 	f->stepwise.max_width = f->pixel_format == V4L2_PIX_FMT_AV1_FRAME ?
-		1920 : SC2_MAX_WIDTH;
+		3840 : SC2_MAX_WIDTH;
 	f->stepwise.step_width = f->pixel_format == V4L2_PIX_FMT_NV12 ||
 		f->pixel_format == V4L2_PIX_FMT_NV21 ||
 		f->pixel_format == V4L2_PIX_FMT_AMLOGIC_FBC10 ? 64 : 2;
 	f->stepwise.min_height = 64;
 	f->stepwise.max_height = f->pixel_format == V4L2_PIX_FMT_AV1_FRAME ?
-		1088 : SC2_MAX_HEIGHT;
+		2160 : SC2_MAX_HEIGHT;
 	f->stepwise.step_height = f->pixel_format == V4L2_PIX_FMT_NV12 ||
 		f->pixel_format == V4L2_PIX_FMT_NV21 ||
 		f->pixel_format == V4L2_PIX_FMT_AMLOGIC_FBC10 ? 64 : 2;
@@ -411,7 +409,13 @@ static int sc2_buf_prepare(struct vb2_buffer *vb)
 		buf->output_buffer = dmabuf;
 	}
 	if (!buf->surface.cpu) {
-		if (ctx->source_fmt.pixelformat == V4L2_PIX_FMT_AV1_FRAME)
+		if (ctx->capture_fmt.pixelformat == V4L2_PIX_FMT_AMLOGIC_FBC10 &&
+		    ctx->source_fmt.pixelformat == V4L2_PIX_FMT_AV1_FRAME)
+			ret = meson_sc2_av1_fbc_bind(ctx->hwctx, &buf->surface,
+				ctx->source_fmt.width, ctx->source_fmt.height,
+				vb2_plane_vaddr(vb, 0), vb2_dma_contig_plane_dma_addr(vb, 0),
+				vb2_plane_size(vb, 0), dmabuf);
+		else if (ctx->source_fmt.pixelformat == V4L2_PIX_FMT_AV1_FRAME)
 			ret = meson_sc2_av1_surface_alloc(ctx->dev->hw, &buf->surface,
 				ctx->source_fmt.width, ctx->source_fmt.height);
 		else if (ctx->capture_fmt.pixelformat == V4L2_PIX_FMT_AMLOGIC_FBC10)

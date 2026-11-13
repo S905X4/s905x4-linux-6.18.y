@@ -7,20 +7,24 @@
 #define AV1_DECOMP_AXIURG_CTL (0x34c7 * 4)
 #define AV1_MMU_DMA_CTRL (0x363e * 4)
 #define A8_PHYSICAL_SLOTS 16
-#define AV1_WORK_SIZE 0x230000
-#define AV1_RPM 0x221000
-#define AV1_LMEM 0x222000
-#define AV1_AUX 0x223000
+/* Page-aligned capacities from vav1.c aom_workbuff_spec[1] (4096x2304).
+ * Only the board's 3840x2160 envelope is advertised. CDF and segmentation
+ * remain per physical slot across parser resets and dependent pictures.
+ */
+#define AV1_WORK_SIZE 0x510000
+#define AV1_RPM 0x4fb000
+#define AV1_LMEM 0x4fc000
+#define AV1_AUX 0x4fd000
+#define AV1_SEG_STRIDE 0x36000
 
 enum av1_workspace_id { IPP, SEG, DAALA, CDF, GMC, DBLK_PARA, DBLK_DATA,
                        CDEF, UPS, GRAIN, MMU_VBH, MPRED_ABOVE };
 static const u32 av1_workspace_offsets[] = {
-    [IPP] = 0, [SEG] = 0x4000, [DAALA] = 0xcf000, [CDF] = 0xd1000,
-    [GMC] = 0x151000, [DBLK_PARA] = 0x152000, [DBLK_DATA] = 0x153000,
-    [CDEF] = 0x19c000, [UPS] = 0x1bf000, [GRAIN] = 0x1f5000,
-    [MMU_VBH] = 0x215000, [MPRED_ABOVE] = 0x21e000,
+    [IPP] = 0, [SEG] = 0x4000, [DAALA] = 0x364000, [CDF] = 0x366000,
+    [GMC] = 0x3e6000, [DBLK_PARA] = 0x3e7000, [DBLK_DATA] = 0x3e9000,
+    [CDEF] = 0x43c000, [UPS] = 0x461000, [GRAIN] = 0x4d0000,
+    [MMU_VBH] = 0x4f0000, [MPRED_ABOVE] = 0x4f5000,
 };
-enum av1_slot_dma_id { A8_MV };
 struct av1_retained_picture {
     struct meson_sc2_surface surface;
     struct v4l2_ctrl_av1_frame frame;
@@ -47,11 +51,9 @@ static u32 av1_workspace(struct sc2_av1_state *st, enum av1_workspace_id id)
 {
     return lower_32_bits(st->work_dma) + av1_workspace_offsets[id];
 }
-static u32 av1_seq_dma(struct sc2_av1_state *st, unsigned int physical,
-                       enum av1_slot_dma_id id)
+static u32 av1_seq_dma(struct sc2_av1_state *st, unsigned int physical)
 {
-    return lower_32_bits(st->slot[physical].surface.dma) +
-           st->slot[physical].surface.mv_offset;
+    return lower_32_bits(st->slot[physical].surface.mv_dma);
 }
 static void sc2_av1_reset(struct meson_sc2_hevc_context *ctx)
 {
@@ -329,10 +331,10 @@ static void av1_seq_mpred(struct sc2_av1_state *st, struct meson_sc2_hw *hw, con
         sc2_write(hw, HEVC_MPRED_L0_REF00_POC + (3 + i) * 4, ref_words[i]);
     for (i = 0; i < 6; i++)
         sc2_write(hw, HEVC_MPRED_L0_REF00_POC + (6 + i) * 4, offset_words[i]);
-    sc2_write(hw, HEVC_MPRED_MV_WR_START_ADDR, av1_seq_dma(st, st->current_slot, A8_MV));
-    sc2_write(hw, HEVC_MPRED_MV_WPTR, av1_seq_dma(st, st->current_slot, A8_MV));
+    sc2_write(hw, HEVC_MPRED_MV_WR_START_ADDR, av1_seq_dma(st, st->current_slot));
+    sc2_write(hw, HEVC_MPRED_MV_WPTR, av1_seq_dma(st, st->current_slot));
     for (i = 0; i < count; i++) {
-        u32 mv = av1_seq_dma(st, st->refs[selected[i] - 1], A8_MV);
+        u32 mv = av1_seq_dma(st, st->refs[selected[i] - 1]);
         if (!i) {
             sc2_write(hw, HEVC_MPRED_MV_RD_START_ADDR, mv);
             sc2_write(hw, HEVC_MPRED_MV_RPTR, mv);
@@ -473,9 +475,9 @@ static void av1_seq_filters(struct sc2_av1_state *st, struct meson_sc2_hw *hw, c
         sc2_write(hw, A1_UPSCALE_STEP, (c_step << 16) | y_step);
     }
     sc2_write(hw, HEVC_ASSIST_SCRATCH_8, av1_workspace(st, CDF) + st->current_slot * 0x8000);
-    sc2_write(hw, A1_SEG_WRITE, av1_workspace(st, SEG) + st->current_slot * 0xca80);
+    sc2_write(hw, A1_SEG_WRITE, av1_workspace(st, SEG) + st->current_slot * AV1_SEG_STRIDE);
     sc2_write(hw, HEVC_ASSIST_SCRATCH_9, av1_workspace(st, CDF) + (prev ? st->primary * 0x8000 : 0));
-    sc2_write(hw, A1_SEG_READ, av1_workspace(st, SEG) + (prev ? st->primary * 0xca80 : 0));
+    sc2_write(hw, A1_SEG_READ, av1_workspace(st, SEG) + (prev ? st->primary * AV1_SEG_STRIDE : 0));
     if (prev && (p[76] & 3) == 1)
         for (i = 0; i < 8; i++)
             sc2_write(hw, A8_QUANT_FEATURE, prev->segment_feature[i]);
@@ -513,7 +515,7 @@ static void sc2_av1_parser(struct meson_sc2_hevc_context *ctx,
     sc2_write(hw, HEVC_CM_HEADER_OFFSET, job->output.destination->body_size);
     sc2_write(hw, HEVC_CM_HEADER_LENGTH, job->output.destination->header_size);
     sc2_write(hw, HEVC_SAO_MMU_VH0_ADDR, av1_workspace(st, MMU_VBH));
-    sc2_write(hw, HEVC_SAO_MMU_VH1_ADDR, av1_workspace(st, MMU_VBH) + 0x1800);
+    sc2_write(hw, HEVC_SAO_MMU_VH1_ADDR, av1_workspace(st, MMU_VBH) + 0x2800);
     value = (sc2_read(hw, HEVC_SAO_CTRL5) | BIT(10)) & ~BIT(15);
     sc2_write(hw, HEVC_SAO_CTRL5, value);
     sc2_write(hw, HEVC_ASSIST_SCRATCH_I, lower_32_bits(st->work_dma + AV1_LMEM));
@@ -676,11 +678,10 @@ static int sc2_av1_validate(struct meson_sc2_hevc_context *ctx,
     bool intra = f->frame_type == V4L2_AV1_KEY_FRAME ||
                  f->frame_type == V4L2_AV1_INTRA_ONLY_FRAME;
 
-    /* Main8 NV12/NV21 only. DW8 is not full-depth Main10. The stock workspace
-     * capacities are the <=1920x1088 layout, not an invented 4K layout. */
-    if (s->seq_profile || s->bit_depth != 8 || width < 64 || height < 64 ||
-        width > 1920 || height > 1088 || (height & 1) ||
-        f->upscaled_width < width || f->upscaled_width > 1920 ||
+    /* Full-depth Main10 is the native first-write FBC surface, never DW8. */
+    if (s->seq_profile || (s->bit_depth != 8 && s->bit_depth != 10) ||
+        width < 64 || height < 64 || width > 3840 || height > 2160 || (height & 1) ||
+        f->upscaled_width < width || f->upscaled_width > 3840 ||
         (f->upscaled_width & 1) ||
         (s->flags & (V4L2_AV1_SEQUENCE_FLAG_MONO_CHROME |
                      V4L2_AV1_SEQUENCE_FLAG_FILM_GRAIN_PARAMS_PRESENT)) ||
@@ -700,14 +701,23 @@ static int sc2_av1_validate(struct meson_sc2_hevc_context *ctx,
             return -EOPNOTSUPP;
     if (!owner || (owner->context && owner->context != ctx) ||
         owner->surface.width != f->upscaled_width || owner->surface.height != height ||
-        owner->surface.depth != 8 || owner->surface.mv_size < SZ_1M ||
-        (out->output_format != V4L2_PIX_FMT_NV12 &&
-         out->output_format != V4L2_PIX_FMT_NV21) ||
-        !out->output_buffer || out->output_stride != ALIGN(f->upscaled_width, 64) ||
-        out->output_uv_offset != out->output_stride * ALIGN(height, 64) ||
-        out->output_size < out->output_uv_offset * 3 / 2 ||
-        out->output_buffer->size < out->output_size)
+        owner->surface.depth != s->bit_depth || owner->surface.mv_size < SZ_1M ||
+        !out->output_buffer || out->output_buffer->size < out->output_size)
         return -EINVAL;
+    if (s->bit_depth == 10) {
+        if (out->output_format != V4L2_PIX_FMT_AMLOGIC_FBC10 ||
+            !owner->surface.capture_owned || owner->capture_buffer != out->output_buffer ||
+            out->output_stride || out->output_uv_offset ||
+            out->output_size != meson_sc2_hevc_fbc_size(f->upscaled_width, height))
+            return -EINVAL;
+    } else if ((out->output_format != V4L2_PIX_FMT_NV12 &&
+                out->output_format != V4L2_PIX_FMT_NV21) ||
+               owner->surface.capture_owned ||
+               out->output_stride != ALIGN(f->upscaled_width, 64) ||
+               out->output_uv_offset != out->output_stride * ALIGN(height, 64) ||
+               out->output_size < out->output_uv_offset * 3 / 2) {
+        return -EINVAL;
+    }
     if (st->initialized &&
         (f->upscaled_width != st->upscaled_width || height != st->height ||
          memcmp(s, &st->sequence_control, sizeof(*s))))
@@ -816,6 +826,8 @@ static void sc2_av1_program(struct meson_sc2_hevc_context *ctx,
     bool resilient = p[14] == 3 || (p[14] == 0 && p[15]) || p[16];
     u32 value, skip = av1_seq_skip_mode(st, p);
     unsigned int i, pages = DIV_ROUND_UP(s->body_size, SZ_4K);
+    u32 body = DIV_ROUND_UP(st->upscaled_width, 64) *
+               DIV_ROUND_UP(st->height, 32) * (s->depth == 10 ? SZ_4K : 3200);
 
     for (i = 0; i < SC2_MAP_ENTRIES; i++)
         map[i] = cpu_to_le32((s->dma + s->body_offset +
@@ -833,12 +845,12 @@ static void sc2_av1_program(struct meson_sc2_hevc_context *ctx,
     sc2_write(hw, A1_SKIP_MODE_INFO, skip | (st->current_slot << 16));
     sc2_write(hw, HEVC_PARSER_PICTURE_SIZE, (st->height << 16) | st->upscaled_width);
     sc2_write(hw, A1_PIC_SIZE_FB, (st->height << 16) | st->upscaled_width);
-    sc2_write(hw, HEVC_SAO_CTRL5,
-              (sc2_read(hw, HEVC_SAO_CTRL5) | BIT(9) | BIT(10)) & ~BIT(15));
+    value = (sc2_read(hw, HEVC_SAO_CTRL5) | BIT(10)) & ~(BIT(9) | BIT(15));
+    sc2_write(hw, HEVC_SAO_CTRL5, value | (s->depth == 8 ? BIT(9) : 0));
     sc2_write(hw, HEVCD_MPP_DECOMP_CTL1, BIT(4));
-    sc2_write(hw, HEVCD_MPP_DECOMP_CTL2, s->body_size >> 5);
-    sc2_write(hw, HEVC_CM_BODY_LENGTH, s->body_size);
-    sc2_write(hw, HEVC_CM_HEADER_OFFSET, s->body_size);
+    sc2_write(hw, HEVCD_MPP_DECOMP_CTL2, body >> 5);
+    sc2_write(hw, HEVC_CM_BODY_LENGTH, body);
+    sc2_write(hw, HEVC_CM_HEADER_OFFSET, body);
     sc2_write(hw, HEVC_CM_HEADER_LENGTH, s->header_size);
     sc2_write(hw, AV1_MMU_DMA_CTRL, lower_32_bits(ctx->work_dma + W_MAP));
     av1_seq_mc(st, hw, intra);
@@ -853,20 +865,27 @@ static void sc2_av1_program(struct meson_sc2_hevc_context *ctx,
     sc2_write(hw, HEVC_CM_HEADER_START_ADDR, lower_32_bits(s->dma));
     sc2_write(hw, A1_FGS_TABLE, av1_workspace(st, GRAIN) + st->current_slot * 0x2000);
     sc2_write(hw, A1_FGS_LENGTH, 0x2000 * 8);
-    sc2_write(hw, HEVC_SAO_Y_LENGTH, out->output_uv_offset);
-    sc2_write(hw, HEVC_SAO_C_LENGTH, out->output_size - out->output_uv_offset);
-    sc2_write(hw, HEVC_SAO_Y_START_ADDR, lower_32_bits(hw->output_dma));
-    sc2_write(hw, HEVC_SAO_C_START_ADDR,
-              lower_32_bits(hw->output_dma) + out->output_uv_offset);
-    sc2_write(hw, HEVC_SAO_Y_WPTR, lower_32_bits(hw->output_dma));
-    sc2_write(hw, HEVC_SAO_C_WPTR,
-              lower_32_bits(hw->output_dma) + out->output_uv_offset);
+    if (!s->capture_owned) {
+        sc2_write(hw, HEVC_SAO_Y_LENGTH, out->output_uv_offset);
+        sc2_write(hw, HEVC_SAO_C_LENGTH, out->output_size - out->output_uv_offset);
+        sc2_write(hw, HEVC_SAO_Y_START_ADDR, lower_32_bits(hw->output_dma));
+        sc2_write(hw, HEVC_SAO_C_START_ADDR,
+                  lower_32_bits(hw->output_dma) + out->output_uv_offset);
+        sc2_write(hw, HEVC_SAO_Y_WPTR, lower_32_bits(hw->output_dma));
+        sc2_write(hw, HEVC_SAO_C_WPTR,
+                  lower_32_bits(hw->output_dma) + out->output_uv_offset);
+    }
     value = sc2_read(hw, HEVC_SAO_CTRL1) & ~(0x3000 | 0xff0 | 3 | (3 << 14));
     sc2_write(hw, HEVC_SAO_CTRL1, value |
-              (out->output_format == V4L2_PIX_FMT_NV21 ? 0xef0 : 0xff0) | (2 << 14));
+              (out->output_format == V4L2_PIX_FMT_NV21 ? 0xef0 : 0xff0) |
+              (2 << 14) | (s->capture_owned ? BIT(1) : 0));
     value = sc2_read(hw, HEVCD_IPP_AXIIF_CONFIG) & ~(0x30 | 0xf | BIT(12) | (3 << 8));
     sc2_write(hw, HEVCD_IPP_AXIIF_CONFIG, value | 0xf | (2 << 8));
     av1_seq_filters(st, hw, p);
+    /* vav1 config_sao_hw: FBC first write always on; DW only for NV12/NV21. */
+    value = sc2_read(hw, HEVC_DBLK_CFGB) & ~(BIT(8) | BIT(9));
+    sc2_write(hw, HEVC_DBLK_CFGB, value | BIT(8) |
+              (s->capture_owned ? 0 : BIT(9)));
     dma_wmb();
     sc2_write(hw, HEVC_ASSIST_SCRATCH_0, 5); /* AV1: status only, NO MCPU IRQ. */
 }
@@ -901,7 +920,8 @@ static int sc2_av1_run(struct meson_sc2_hevc_context *ctx,
             for (i = 0; i < 128; i++)
                 p[i] = le16_to_cpu(raw[(i & ~3U) + 3 - (i & 3)]);
             if (status == 0xf2) {
-                if (++sequences != 1 || p[0] || p[56] != 8 ||
+                if (++sequences != 1 || p[0] ||
+                    p[56] != job->syntax->sequence->bit_depth ||
                     !!(p[57] & BIT(6)) !=
                     !!(job->syntax->sequence->flags & V4L2_AV1_SEQUENCE_FLAG_USE_128X128_SUPERBLOCK) ||
                     !!(p[57] & BIT(15)) !=
@@ -914,7 +934,8 @@ static int sc2_av1_run(struct meson_sc2_hevc_context *ctx,
                 if (!sequences || ++headers != 1 || p[13] || p[14] != f->frame_type ||
                     p[21] != f->order_hint || p[22] != f->primary_ref_frame ||
                     p[17] != f->refresh_frame_flags || p[25] != st->width ||
-                    p[26] != st->upscaled_width || p[27] != st->height || p[56] != 8)
+                    p[26] != st->upscaled_width || p[27] != st->height ||
+                    p[56] != job->syntax->sequence->bit_depth)
                     return -EPROTO;
                 for (i = 0; i < 7; i++)
                     if (!av1_seq_intra(p[14]) && p[34 + i] != f->ref_frame_idx[i])
@@ -1027,7 +1048,10 @@ int meson_sc2_av1_decode(struct meson_sc2_hevc_context *ctx,
     if (!ret && (recovered || atomic_read(&ctx->aborted)))
         ret = recovered ? -EIO : -ECANCELED;
     dma_rmb();
-    if (!sc2_surface_guards(job->output.destination))
+    if (!sc2_surface_guards(job->output.destination) ||
+        (owner->capture_buffer &&
+         memchr_inv(owner->private_mv + owner->surface.mv_size,
+                    SC2_GUARD_BYTE, SC2_GUARD_SIZE)))
         ret = -EIO;
     if (!ret) {
         const struct v4l2_ctrl_av1_frame *f = job->syntax->frame;

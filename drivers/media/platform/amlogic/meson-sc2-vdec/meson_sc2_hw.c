@@ -91,9 +91,9 @@ static void sc2_avs2_release(struct meson_sc2_hevc_context *ctx);
 #define W_MPRED_ABOVE                  0x499000
 #define W_RPM                          0x4a1000
 #define W_LMEM                         0x4a2000
-#define W_MAP                          0x4a3000
-#define W_AUX                          0x4b3000
-#define SC2_WORK_SIZE                  0x4c0000
+#define W_MAP                          0x510000
+#define W_AUX                          0x520000
+#define SC2_WORK_SIZE                  0x530000
 #define SC2_MAP_ENTRIES                (SZ_64K / sizeof(u32))
 
 static const u16 sc2_parser_commands[] = {
@@ -642,7 +642,7 @@ u32 meson_sc2_hevc_fbc_size(u32 width, u32 height)
 
 static int sc2_fbc_bind(struct meson_sc2_hevc_context *ctx,
 			struct meson_sc2_surface *surface,
-			u32 width, u32 height, u8 depth, u32 mv_unit, bool dw8,
+			u32 width, u32 height, u8 depth, u32 mv_unit, bool dw8, bool av1,
 			void *cpu, dma_addr_t dma, size_t size,
 			struct dma_buf *buffer)
 {
@@ -681,6 +681,8 @@ static int sc2_fbc_bind(struct meson_sc2_hevc_context *ctx,
 	s.mv_size = ALIGN(columns * rows * mv_unit +
 			  (mv_unit == 0x240 ? columns * 16 * ((rows >> 3) + (rows & 7)) : 0),
 			  SZ_64K);
+	if (av1)
+		s.mv_size = max_t(u32, s.mv_size, SZ_1M);
 	if (s.body_size / SZ_4K > SC2_MAP_ENTRIES)
 		return -EOVERFLOW;
 	owner = kzalloc(sizeof(*owner), GFP_KERNEL);
@@ -754,7 +756,7 @@ int meson_sc2_hevc_fbc_bind(struct meson_sc2_hevc_context *ctx,
 			   u32 width, u32 height, void *cpu, dma_addr_t dma,
 			   size_t size, struct dma_buf *buffer)
 {
-	return sc2_fbc_bind(ctx, surface, width, height, 10, 0x200, true,
+	return sc2_fbc_bind(ctx, surface, width, height, 10, 0x200, true, false,
 			    cpu, dma, size, buffer);
 }
 
@@ -764,7 +766,20 @@ int meson_sc2_modern_fbc_bind(struct meson_sc2_hevc_context *ctx,
 			     void *cpu, dma_addr_t dma, size_t size,
 			     struct dma_buf *buffer)
 {
-	return sc2_fbc_bind(ctx, surface, width, height, depth, mv_unit, false,
+	return sc2_fbc_bind(ctx, surface, width, height, depth, mv_unit, false, false,
+			    cpu, dma, size, buffer);
+}
+
+int meson_sc2_av1_fbc_bind(struct meson_sc2_hevc_context *ctx,
+			  struct meson_sc2_surface *surface,
+			  u32 width, u32 height, void *cpu, dma_addr_t dma,
+			  size_t size, struct dma_buf *buffer)
+{
+	/* SC2 cal_mv_buf_size (19/76 vectors per SB64/SB128) fits in this
+	 * conservative CTU64 allocation, with the existing 1 MiB AV1 minimum.
+	 * Full-depth CAPTURE is the first write; no DW8 allocation or copy.
+	 */
+	return sc2_fbc_bind(ctx, surface, width, height, 10, 0x200, false, true,
 			    cpu, dma, size, buffer);
 }
 
