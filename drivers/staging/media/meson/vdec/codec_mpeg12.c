@@ -935,6 +935,11 @@ static int mpeg12_multi_picture_format(struct mpeg12_multi *m,
 		kfree(f);
 		f = next;
 	}
+	/* Completion offsets advance in coded order within the bounded FIFO.
+	 * Move the retained interval's watermark so unchanged geometry remains
+	 * valid across 2 GiB and full 32-bit stream-offset wraparound.
+	 */
+	f->offset = pic->packet_offset;
 	pic->width = f->width;
 	pic->height = f->height;
 	return 0;
