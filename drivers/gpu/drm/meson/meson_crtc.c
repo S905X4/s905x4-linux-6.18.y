@@ -189,14 +189,15 @@ static void meson_crtc_sc2_output_scaler(struct meson_drm *priv, bool enabled)
 	writel_relaxed(0, priv->io_base + _REG(base + 3));
 	writel_relaxed(0, priv->io_base + _REG(base + 4));
 	writel_relaxed(0, priv->io_base + _REG(base + 5));
-	writel_relaxed(interlace ? BIT(3) | BIT(2) : 0,
+	/* The AFBC siblings still need valid shared PPS frame boundaries. */
+	writel_relaxed(enabled ? BIT(3) | BIT(2) : 0,
 			priv->io_base + _REG(base + 8));
-	writel_relaxed(interlace ? (mode->hdisplay - 1) << 16 |
+	writel_relaxed(enabled ? (mode->hdisplay - 1) << 16 |
 			(mode->vdisplay - 1) : 0, priv->io_base + _REG(base + 9));
-	writel_relaxed(interlace ? mode->hdisplay - 1 : 0,
+	writel_relaxed(enabled ? mode->hdisplay - 1 : 0,
 			priv->io_base + _REG(base + 10));
-	writel_relaxed(interlace ? mode->vdisplay / 2 - 1 : 0,
-			priv->io_base + _REG(base + 11));
+	writel_relaxed(enabled ? (interlace ? mode->vdisplay / 2 :
+			mode->vdisplay) - 1 : 0, priv->io_base + _REG(base + 11));
 }
 
 static void meson_crtc_sc2_osd_blend(struct meson_drm *priv)
