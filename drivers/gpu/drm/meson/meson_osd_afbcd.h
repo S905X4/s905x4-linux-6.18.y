@@ -26,4 +26,7 @@ struct meson_afbcd_ops {
 extern struct meson_afbcd_ops meson_afbcd_gxm_ops;
 extern struct meson_afbcd_ops meson_afbcd_g12a_ops;
 
+/* Called once for a complete SC2 OSD transaction, with replay disarmed. */
+void meson_afbcd_sc2_update(struct meson_drm *priv, u32 surface_mask);
+
 #endif /* __MESON_OSD_AFBCD_H */

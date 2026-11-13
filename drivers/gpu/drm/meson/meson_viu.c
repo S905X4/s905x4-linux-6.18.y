@@ -40,6 +40,51 @@
  * - OSD1 full scaling to support TV overscan
  */
 
+const struct meson_osd_regs meson_osd_regs[MESON_MAX_OSDS] = {
+	{
+		.ctrl_stat = VIU_OSD1_CTRL_STAT,
+		.ctrl_stat2 = VIU_OSD1_CTRL_STAT2,
+		.blk0_cfg = { VIU_OSD1_BLK0_CFG_W0, VIU_OSD1_BLK0_CFG_W1,
+			      VIU_OSD1_BLK0_CFG_W2, VIU_OSD1_BLK0_CFG_W3,
+			      VIU_OSD1_BLK0_CFG_W4 },
+		.blk1_cfg4 = VIU_OSD1_BLK1_CFG_W4,
+		.blk2_cfg4 = VIU_OSD1_BLK2_CFG_W4,
+		.fifo_ctrl = VIU_OSD1_FIFO_CTRL_STAT,
+		.unpack_ctrl = VIU_OSD1_MALI_UNPACK_CTRL,
+		.sc_base = VPP_OSD_VSC_PHASE_STEP,
+		.coef_idx = VPP_OSD_SCALE_COEF_IDX,
+		.coef = VPP_OSD_SCALE_COEF,
+	},
+	{
+		.ctrl_stat = VIU_OSD2_CTRL_STAT,
+		.ctrl_stat2 = VIU_OSD2_CTRL_STAT2,
+		.blk0_cfg = { VIU_OSD2_BLK0_CFG_W0, VIU_OSD2_BLK0_CFG_W1,
+			      VIU_OSD2_BLK0_CFG_W2, VIU_OSD2_BLK0_CFG_W3,
+			      VIU_OSD2_BLK0_CFG_W4 },
+		.blk1_cfg4 = VIU_OSD2_BLK1_CFG_W4,
+		.blk2_cfg4 = VIU_OSD2_BLK2_CFG_W4,
+		.fifo_ctrl = VIU_OSD2_FIFO_CTRL_STAT,
+		.unpack_ctrl = VIU_OSD2_MALI_UNPACK_CTRL,
+		.sc_base = OSD2_VSC_PHASE_STEP,
+		.coef_idx = OSD2_SCALE_COEF_IDX,
+		.coef = OSD2_SCALE_COEF,
+	},
+	{
+		.ctrl_stat = VIU_OSD3_CTRL_STAT,
+		.ctrl_stat2 = VIU_OSD3_CTRL_STAT2,
+		.blk0_cfg = { VIU_OSD3_BLK0_CFG_W0, VIU_OSD3_BLK0_CFG_W1,
+			      VIU_OSD3_BLK0_CFG_W2, VIU_OSD3_BLK0_CFG_W3,
+			      VIU_OSD3_BLK0_CFG_W4 },
+		.blk1_cfg4 = VIU_OSD3_BLK1_CFG_W4,
+		.blk2_cfg4 = VIU_OSD3_BLK2_CFG_W4,
+		.fifo_ctrl = VIU_OSD3_FIFO_CTRL_STAT,
+		.unpack_ctrl = VIU_OSD3_MALI_UNPACK_CTRL,
+		.sc_base = OSD34_VSC_PHASE_STEP,
+		.coef_idx = OSD34_SCALE_COEF_IDX,
+		.coef = OSD34_SCALE_COEF,
+	},
+};
+
 /* OSD csc defines */
 
 enum viu_matrix_sel_e {
@@ -358,45 +403,36 @@ void meson_viu_osd1_reset(struct meson_drm *priv)
 	 FIELD_PREP(VIU_OSD1_MALI_AFBCD_R_REORDER,	\
 		    VIU_OSD1_MALI_REORDER_B))
 
-void meson_viu_g12a_enable_osd1_afbc(struct meson_drm *priv)
+void meson_viu_osd_afbc_select(struct meson_drm *priv, unsigned int index,
+			      bool enable)
 {
-	u32 afbc_order = OSD1_MALI_ORDER_ARGB;
+	const struct meson_osd_regs *regs = &meson_osd_regs[index];
+	u32 order = OSD1_MALI_ORDER_ARGB;
+	u32 mask = VIU_OSD1_MALI_UNPACK_EN |
+		VIU_OSD1_MALI_AFBCD_A_REORDER | VIU_OSD1_MALI_AFBCD_B_REORDER |
+		VIU_OSD1_MALI_AFBCD_G_REORDER | VIU_OSD1_MALI_AFBCD_R_REORDER;
 
-	/* Enable Mali AFBC Unpack */
-	writel_bits_relaxed(VIU_OSD1_MALI_UNPACK_EN,
-			    VIU_OSD1_MALI_UNPACK_EN,
-			    priv->io_base + _REG(VIU_OSD1_MALI_UNPACK_CTRL));
-
-	switch (priv->afbcd.format) {
+	switch (priv->viu.osd[index].format) {
 	case DRM_FORMAT_XBGR8888:
 	case DRM_FORMAT_ABGR8888:
-		afbc_order = OSD1_MALI_ORDER_ABGR;
+		order = OSD1_MALI_ORDER_ABGR;
 		break;
 	}
-
-	/* Setup RGBA Reordering */
-	writel_bits_relaxed(VIU_OSD1_MALI_AFBCD_A_REORDER |
-			    VIU_OSD1_MALI_AFBCD_B_REORDER |
-			    VIU_OSD1_MALI_AFBCD_G_REORDER |
-			    VIU_OSD1_MALI_AFBCD_R_REORDER,
-			    afbc_order,
-			    priv->io_base + _REG(VIU_OSD1_MALI_UNPACK_CTRL));
-
-	/* Select AFBCD path for OSD1 */
-	writel_bits_relaxed(OSD_PATH_OSD_AXI_SEL_OSD1_AFBCD,
-			    OSD_PATH_OSD_AXI_SEL_OSD1_AFBCD,
+	writel_bits_relaxed(mask, enable ? VIU_OSD1_MALI_UNPACK_EN | order : 0,
+			    priv->io_base + _REG(regs->unpack_ctrl));
+	/* BSP OSD_PATH_MISC_CTRL[index + 4], shared by all three fetchers. */
+	writel_bits_relaxed(BIT(index + 4), enable ? BIT(index + 4) : 0,
 			    priv->io_base + _REG(OSD_PATH_MISC_CTRL));
+}
+
+void meson_viu_g12a_enable_osd1_afbc(struct meson_drm *priv)
+{
+	meson_viu_osd_afbc_select(priv, 0, true);
 }
 
 void meson_viu_g12a_disable_osd1_afbc(struct meson_drm *priv)
 {
-	/* Disable AFBCD path for OSD1 */
-	writel_bits_relaxed(OSD_PATH_OSD_AXI_SEL_OSD1_AFBCD, 0,
-			    priv->io_base + _REG(OSD_PATH_MISC_CTRL));
-
-	/* Disable AFBCD unpack */
-	writel_bits_relaxed(VIU_OSD1_MALI_UNPACK_EN, 0,
-			    priv->io_base + _REG(VIU_OSD1_MALI_UNPACK_CTRL));
+	meson_viu_osd_afbc_select(priv, 0, false);
 }
 
 void meson_viu_gxm_enable_osd1_afbc(struct meson_drm *priv)
@@ -430,6 +466,60 @@ void meson_viu_video_afbc_select(struct meson_drm *priv,
 		writel_relaxed(afbc ? mask : 0,
 			       priv->io_base + _REG(VD1_AFBCD0_MISC_CTRL));
 	}
+}
+
+static void meson_viu_sc2_init_osds(struct meson_drm *priv, u32 fifo)
+{
+	/* Same four-tap B-spline filter as the primary PPS. */
+	static const u32 coefs[] = {
+		0x15561500, 0x14561600, 0x13561700, 0x12561800,
+		0x11551a00, 0x11541b00, 0x10541c00, 0x0f541d00,
+		0x0f531e00, 0x0e531f00, 0x0d522100, 0x0c522200,
+		0x0b522300, 0x0b512400, 0x0a502600, 0x0a4f2700,
+		0x094e2900, 0x084e2a00, 0x084d2b00, 0x074c2c01,
+		0x074b2d01, 0x064a2f01, 0x06493001, 0x05483201,
+		0x05473301, 0x05463401, 0x04453601, 0x04433702,
+		0x04423802, 0x03413a02, 0x03403b02, 0x033f3c02,
+		0x033d3d03,
+	};
+	unsigned int index, horizontal, i;
+
+	if (!priv->viu.osd1_bypass_initialized) {
+		priv->viu.osd1_bypass_alpha_div = readl_relaxed(priv->io_base +
+				_REG(meson_osd_regs[0].unpack_ctrl)) & BIT(28);
+		priv->viu.osd1_bypass_blend_ctrl1 = readl_relaxed(priv->io_base +
+				_REG(VIU_OSD_BLEND_CTRL1));
+		priv->viu.osd1_bypass_initialized = true;
+	}
+
+	for (index = 0; index < MESON_MAX_OSDS; index++) {
+		const struct meson_osd_regs *regs = &meson_osd_regs[index];
+
+		writel_bits_relaxed(OSD_ENABLE | OSD_BLK0_ENABLE, 0,
+				    priv->io_base + _REG(regs->ctrl_stat));
+		writel_relaxed(fifo, priv->io_base + _REG(regs->fifo_ctrl));
+		writel_bits_relaxed(0xff << OSD_REPLACE_SHIFT,
+				    0xff << OSD_REPLACE_SHIFT,
+				    priv->io_base + _REG(regs->ctrl_stat2));
+		meson_viu_osd_afbc_select(priv, index, false);
+		priv->viu.osd[index].enabled = false;
+		priv->viu.osd[index].commit = false;
+		priv->viu.osd[index].interlace = false;
+		if (!index)
+			continue;
+		writel_relaxed(0, priv->io_base + _REG(index == 1 ?
+				VIU_OSD2_DIMM_CTRL : VIU_OSD3_DIMM_CTRL));
+		writel_relaxed(0, priv->io_base + _REG(regs->sc_base + 8));
+		writel_relaxed(0, priv->io_base + _REG(regs->sc_base + 2));
+		writel_relaxed(0, priv->io_base + _REG(regs->sc_base + 5));
+		for (horizontal = 0; horizontal < 2; horizontal++) {
+			writel_relaxed(horizontal << 8,
+				       priv->io_base + _REG(regs->coef_idx));
+			for (i = 0; i < ARRAY_SIZE(coefs); i++)
+				writel_relaxed(coefs[i], priv->io_base + _REG(regs->coef));
+		}
+	}
+	priv->afbcd.active_mask = 0;
 }
 
 void meson_viu_init(struct meson_drm *priv)
@@ -488,6 +578,8 @@ void meson_viu_init(struct meson_drm *priv)
 	writel_bits_relaxed(0xff << OSD_REPLACE_SHIFT,
 			    0xff << OSD_REPLACE_SHIFT,
 			    priv->io_base + _REG(VIU_OSD2_CTRL_STAT2));
+	if (priv->sc2)
+		meson_viu_sc2_init_osds(priv, reg);
 
 	/* Disable VD1 AFBC */
 	/* di_mif0_en=0 mif0_to_vpp_en=0 di_mad_en=0 and afbc vd1 set=0*/
@@ -546,7 +638,7 @@ void meson_viu_init(struct meson_drm *priv)
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_GXM))
 		meson_viu_gxm_disable_osd1_afbc(priv);
 
-	priv->viu.osd1_enabled = false;
-	priv->viu.osd1_commit = false;
-	priv->viu.osd1_interlace = false;
+	priv->viu.osd[0].enabled = false;
+	priv->viu.osd[0].commit = false;
+	priv->viu.osd[0].interlace = false;
 }

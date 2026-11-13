@@ -134,6 +134,24 @@ void meson_viu_video_afbc_select(struct meson_drm *priv,
 #define OSD_REPLACE_SHIFT	6
 #define OSD_PENDING_STAT_CLEAN	BIT(1)
 
+struct meson_osd_regs {
+	u32 ctrl_stat;
+	u32 ctrl_stat2;
+	u32 blk0_cfg[5];
+	u32 blk1_cfg4;
+	u32 blk2_cfg4;
+	u32 fifo_ctrl;
+	u32 unpack_ctrl;
+	/* PPS offsets 0..11 match the VPP_OSD_VSC_PHASE_STEP bank. */
+	u32 sc_base;
+	u32 coef_idx;
+	u32 coef;
+};
+
+extern const struct meson_osd_regs meson_osd_regs[MESON_MAX_OSDS];
+void meson_viu_osd_afbc_select(struct meson_drm *priv, unsigned int index,
+			      bool enable);
+
 void meson_viu_osd1_reset(struct meson_drm *priv);
 void meson_viu_g12a_enable_osd1_afbc(struct meson_drm *priv);
 void meson_viu_g12a_disable_osd1_afbc(struct meson_drm *priv);

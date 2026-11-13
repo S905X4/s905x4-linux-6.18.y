@@ -112,6 +112,41 @@ struct meson_video_state {
 	uint32_t vpp_blend_vd2_v_start_end;
 };
 
+#define MESON_MAX_OSDS 3
+
+/* One fetcher, canvas and decoder surface per VIU1 OSD. */
+struct meson_osd_state {
+	bool enabled;
+	bool interlace;
+	bool commit;
+	bool afbcd;
+	u64 modifier;
+	u32 format;
+	u32 ctrl_stat;
+	u32 ctrl_stat2;
+	u32 blk0_cfg[5];
+	u32 blk1_cfg4;
+	u32 blk2_cfg4;
+	u32 addr;
+	u32 stride;
+	u32 height;
+	u32 width;
+	u32 sc_ctrl0;
+	u32 sc_i_wh_m1;
+	u32 sc_o_h_start_end;
+	u32 sc_o_v_start_end;
+	u32 sc_v_ini_phase;
+	u32 sc_v_phase_step;
+	u32 sc_h_ini_phase;
+	u32 sc_h_phase_step;
+	u32 sc_h_ctrl0;
+	u32 sc_v_ctrl0;
+	u32 blend_scope_h;
+	u32 blend_scope_v;
+	u32 blend0_size;
+	u32 blend1_size;
+};
+
 struct meson_drm {
 	struct device *dev;
 	enum vpu_compatible compat;
@@ -124,12 +159,13 @@ struct meson_drm {
 	int vsync_irq;
 
 	struct meson_canvas *canvas;
-	u8 canvas_id_osd1;
+	u8 canvas_id_osd[MESON_MAX_OSDS];
 	u8 canvas_id_vd[2][3];
 
 	struct drm_device *drm;
 	struct drm_crtc *crtc;
 	struct drm_plane *primary_plane;
+	struct drm_plane *osd_planes[MESON_MAX_OSDS];
 	struct drm_plane *overlay_planes[2];
 	void *encoders[MESON_ENC_LAST];
 
@@ -137,33 +173,11 @@ struct meson_drm {
 
 	/* Components Data */
 	struct {
-		bool osd1_enabled;
-		bool osd1_interlace;
-		bool osd1_commit;
-		bool osd1_afbcd;
-		uint32_t osd1_ctrl_stat;
-		uint32_t osd1_ctrl_stat2;
-		uint32_t osd1_blk0_cfg[5];
-		uint32_t osd1_blk1_cfg4;
-		uint32_t osd1_blk2_cfg4;
-		uint32_t osd1_addr;
-		uint32_t osd1_stride;
-		uint32_t osd1_height;
-		uint32_t osd1_width;
-		uint32_t osd_sc_ctrl0;
-		uint32_t osd_sc_i_wh_m1;
-		uint32_t osd_sc_o_h_start_end;
-		uint32_t osd_sc_o_v_start_end;
-		uint32_t osd_sc_v_ini_phase;
-		uint32_t osd_sc_v_phase_step;
-		uint32_t osd_sc_h_ini_phase;
-		uint32_t osd_sc_h_phase_step;
-		uint32_t osd_sc_h_ctrl0;
-		uint32_t osd_sc_v_ctrl0;
-		uint32_t osd_blend_din0_scope_h;
-		uint32_t osd_blend_din0_scope_v;
-		uint32_t osb_blend0_size;
-		uint32_t osb_blend1_size;
+		struct meson_osd_state osd[MESON_MAX_OSDS];
+		/* Preserve the deployed OSD1-only bypass across composition changes. */
+		u32 osd1_bypass_alpha_div;
+		u32 osd1_bypass_blend_ctrl1;
+		bool osd1_bypass_initialized;
 
 		struct meson_video_state video[2];
 	} viu;
@@ -183,8 +197,8 @@ struct meson_drm {
 
 	struct {
 		struct meson_afbcd_ops *ops;
-		u64 modifier;
-		u32 format;
+		/* Applied shared decoder ownership; never reset an active sibling. */
+		u32 active_mask;
 	} afbcd;
 };
 

@@ -10,6 +10,7 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/math64.h>
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
@@ -65,37 +66,107 @@
 struct meson_plane {
 	struct drm_plane base;
 	struct meson_drm *priv;
+	unsigned int index;
 	bool enabled;
 };
 #define to_meson_plane(x) container_of(x, struct meson_plane, base)
 
 #define FRAC_16_16(mult, div)    (((mult) << 16) / (div))
 
+/* SC2's OSD1 PPS follows the blender; OSD2/3 PPS precede it. */
+static void meson_plane_blend_size(struct meson_drm *priv,
+				   struct drm_atomic_state *state,
+				   struct drm_crtc_state *crtc_state,
+				   unsigned int *width, unsigned int *height)
+{
+	struct drm_plane_state *primary;
+
+	primary = drm_atomic_get_new_plane_state(state, priv->primary_plane);
+	if (!primary)
+		primary = priv->primary_plane->state;
+	*width = crtc_state->mode.hdisplay;
+	*height = crtc_state->mode.vdisplay;
+	if (primary->crtc && primary->fb) {
+		*width = drm_rect_width(&primary->src) >> 16;
+		*height = drm_rect_height(&primary->src) >> 16;
+	}
+}
+
+static struct drm_rect meson_plane_blend_dest(struct drm_plane_state *plane_state,
+					     struct drm_crtc_state *crtc_state,
+					     unsigned int width,
+					     unsigned int height)
+{
+	struct drm_rect dest = plane_state->dst;
+
+	dest.x1 = DIV_ROUND_CLOSEST_ULL((u64)dest.x1 * width,
+					crtc_state->mode.hdisplay);
+	dest.x2 = DIV_ROUND_CLOSEST_ULL((u64)dest.x2 * width,
+					crtc_state->mode.hdisplay);
+	dest.y1 = DIV_ROUND_CLOSEST_ULL((u64)dest.y1 * height,
+					crtc_state->mode.vdisplay);
+	dest.y2 = DIV_ROUND_CLOSEST_ULL((u64)dest.y2 * height,
+					crtc_state->mode.vdisplay);
+	return dest;
+}
+
 static int meson_plane_atomic_check(struct drm_plane *plane,
 				    struct drm_atomic_state *state)
 {
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
 										 plane);
+	struct meson_plane *meson_plane = to_meson_plane(plane);
+	struct meson_drm *priv = meson_plane->priv;
+	struct drm_crtc *crtc = new_plane_state->crtc;
 	struct drm_crtc_state *crtc_state;
+	struct drm_plane_state *osd_state;
+	struct drm_rect dest;
+	unsigned int width, height, i;
+	int ret;
 
-	if (!new_plane_state->crtc)
+	if (!crtc) {
+		osd_state = drm_atomic_get_old_plane_state(state, plane);
+		crtc = osd_state->crtc;
+	}
+	if (!crtc)
 		return 0;
 
-	crtc_state = drm_atomic_get_crtc_state(state,
-					       new_plane_state->crtc);
+	crtc_state = drm_atomic_get_crtc_state(state, crtc);
 	if (IS_ERR(crtc_state))
 		return PTR_ERR(crtc_state);
 
-	/*
-	 * Only allow :
-	 * - Upscaling up to 5x, vertical and horizontal
-	 * - Final coordinates must match crtc size
-	 */
-	return drm_atomic_helper_check_plane_state(new_plane_state,
-						   crtc_state,
-						   FRAC_16_16(1, 5),
-						   DRM_PLANE_NO_SCALING,
-						   false, true);
+	/* A primary scale/enable change changes every OSD's blend coordinates. */
+	if (priv->sc2) {
+		for (i = 0; i < MESON_MAX_OSDS; i++) {
+			osd_state = drm_atomic_get_plane_state(state, priv->osd_planes[i]);
+			if (IS_ERR(osd_state))
+				return PTR_ERR(osd_state);
+		}
+	}
+	if (!new_plane_state->crtc)
+		return 0;
+
+	ret = drm_atomic_helper_check_plane_state(new_plane_state, crtc_state,
+			FRAC_16_16(1, 5), meson_plane->index ?
+			FRAC_16_16(5, 1) : DRM_PLANE_NO_SCALING,
+			meson_plane->index != 0, true);
+	if (ret || !meson_plane->index || !new_plane_state->visible)
+		return ret;
+
+	/* The extra PPS consumes integer crop coordinates and progressive RGB. */
+	if ((new_plane_state->src.x1 | new_plane_state->src.y1 |
+	     new_plane_state->src.x2 | new_plane_state->src.y2) & 0xffff)
+		return -EINVAL;
+	meson_plane_blend_size(priv, state, crtc_state, &width, &height);
+	dest = meson_plane_blend_dest(new_plane_state, crtc_state, width, height);
+	if (drm_rect_width(&dest) <= 0 || drm_rect_height(&dest) <= 0 ||
+	    dest.x2 > 4096 || dest.y2 > 4096 ||
+	    ((u64)drm_rect_width(&new_plane_state->src) >> 16) >
+		5 * drm_rect_width(&dest) ||
+	    ((u64)drm_rect_height(&new_plane_state->src) >> 16) >
+		5 * drm_rect_height(&dest))
+		return -EINVAL;
+	return 0;
 }
 
 #define MESON_MOD_AFBC_VALID_BITS (AFBC_FORMAT_MOD_BLOCK_SIZE_16x16 |	\
@@ -110,20 +181,20 @@ static inline int64_t fixed16_to_int(int64_t value)
 	return value >> 16;
 }
 
-static u32 meson_g12a_afbcd_line_stride(struct meson_drm *priv)
+static u32 meson_g12a_afbcd_line_stride(const struct meson_osd_state *osd)
 {
 	u32 line_stride = 0;
 
-	switch (priv->afbcd.format) {
+	switch (osd->format) {
 	case DRM_FORMAT_RGB565:
-		line_stride = ((priv->viu.osd1_width << 4) + 127) >> 7;
+		line_stride = ((osd->width << 4) + 127) >> 7;
 		break;
 	case DRM_FORMAT_RGB888:
 	case DRM_FORMAT_XRGB8888:
 	case DRM_FORMAT_ARGB8888:
 	case DRM_FORMAT_XBGR8888:
 	case DRM_FORMAT_ABGR8888:
-		line_stride = ((priv->viu.osd1_width << 5) + 127) >> 7;
+		line_stride = ((osd->width << 5) + 127) >> 7;
 		break;
 	}
 
@@ -138,6 +209,11 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 									   plane);
 	struct drm_rect dest = drm_plane_state_dest(new_state);
 	struct meson_drm *priv = meson_plane->priv;
+	struct meson_osd_state *osd = &priv->viu.osd[meson_plane->index];
+	const struct meson_osd_regs *regs = &meson_osd_regs[meson_plane->index];
+	struct drm_crtc_state *crtc_state =
+		drm_atomic_get_new_crtc_state(state, new_state->crtc);
+	unsigned int blend_w, blend_h;
 	struct drm_framebuffer *fb = new_state->fb;
 	struct drm_gem_dma_object *gem;
 	unsigned long flags;
@@ -149,10 +225,18 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	int bot_ini_phase;
 	int hf_bank_len;
 	int vf_bank_len;
-	u8 canvas_id_osd1;
+	u8 canvas_id;
 	u32 global_alpha = 0x100;
-	bool sc2_interlace = priv->sc2 &&
+	bool sc2_interlace = priv->sc2 && !meson_plane->index &&
 		(new_state->crtc->mode.flags & DRM_MODE_FLAG_INTERLACE);
+
+	if (!new_state->visible) {
+		spin_lock_irqsave(&priv->drm->event_lock, flags);
+		osd->enabled = false;
+		meson_plane->enabled = false;
+		spin_unlock_irqrestore(&priv->drm->event_lock, flags);
+		return;
+	}
 
 	if (priv->sc2)
 		global_alpha = DIV_ROUND_CLOSEST(new_state->alpha * 0x100,
@@ -170,70 +254,70 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	if ((meson_vpu_is_compatible(priv, VPU_COMPATIBLE_GXM) ||
 	     meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) &&
 	    fb->modifier & DRM_FORMAT_MOD_ARM_AFBC(MESON_MOD_AFBC_VALID_BITS))
-		priv->viu.osd1_afbcd = true;
+		osd->afbcd = true;
 	else
-		priv->viu.osd1_afbcd = false;
+		osd->afbcd = false;
 
 	/* SC2 exposes the OSD's nine-bit global alpha through atomic state. */
-	priv->viu.osd1_ctrl_stat = OSD_ENABLE |
+	osd->ctrl_stat = OSD_ENABLE |
 				   (global_alpha << OSD_GLOBAL_ALPHA_SHIFT) |
 				   OSD_BLK0_ENABLE;
 
-	priv->viu.osd1_ctrl_stat2 = readl(priv->io_base +
-					  _REG(VIU_OSD1_CTRL_STAT2));
+	osd->ctrl_stat2 = readl(priv->io_base + _REG(regs->ctrl_stat2));
 
-	canvas_id_osd1 = priv->canvas_id_osd1;
+	canvas_id = priv->canvas_id_osd[meson_plane->index];
 
 	/* Set up BLK0 to point to the right canvas */
-	priv->viu.osd1_blk0_cfg[0] = canvas_id_osd1 << OSD_CANVAS_SEL;
+	osd->blk0_cfg[0] = canvas_id << OSD_CANVAS_SEL;
 
-	if (priv->viu.osd1_afbcd) {
+	if (osd->afbcd) {
 		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
 			/* This is the internal decoding memory address */
-			priv->viu.osd1_blk1_cfg4 = MESON_G12A_AFBCD_OUT_ADDR;
-			priv->viu.osd1_blk0_cfg[0] |= OSD_ENDIANNESS_BE;
-			priv->viu.osd1_ctrl_stat2 |= OSD_PENDING_STAT_CLEAN;
-			priv->viu.osd1_ctrl_stat |= VIU_OSD1_CFG_SYN_EN;
+			osd->blk1_cfg4 = MESON_G12A_AFBCD_OUT_ADDR *
+					(meson_plane->index + 1);
+			osd->blk0_cfg[0] |= OSD_ENDIANNESS_BE;
+			osd->ctrl_stat2 |= OSD_PENDING_STAT_CLEAN;
+			osd->ctrl_stat |= VIU_OSD1_CFG_SYN_EN;
 		}
 
 		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_GXM)) {
-			priv->viu.osd1_blk0_cfg[0] |= OSD_ENDIANNESS_LE;
-			priv->viu.osd1_ctrl_stat2 |= OSD_DPATH_MALI_AFBCD;
+			osd->blk0_cfg[0] |= OSD_ENDIANNESS_LE;
+			osd->ctrl_stat2 |= OSD_DPATH_MALI_AFBCD;
 		}
 	} else {
-		priv->viu.osd1_blk0_cfg[0] |= OSD_ENDIANNESS_LE;
+		osd->blk0_cfg[0] |= OSD_ENDIANNESS_LE;
 
 		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_GXM))
-			priv->viu.osd1_ctrl_stat2 &= ~OSD_DPATH_MALI_AFBCD;
+			osd->ctrl_stat2 &= ~OSD_DPATH_MALI_AFBCD;
 	}
 
 	/* On GXBB, Use the old non-HDR RGB2YUV converter */
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_GXBB))
-		priv->viu.osd1_blk0_cfg[0] |= OSD_OUTPUT_COLOR_RGB;
+		osd->blk0_cfg[0] |= OSD_OUTPUT_COLOR_RGB;
 
-	if (priv->viu.osd1_afbcd &&
+	if (osd->afbcd &&
 	    meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
-		priv->viu.osd1_blk0_cfg[0] |= OSD_MALI_SRC_EN |
+		osd->blk0_cfg[0] |= OSD_MALI_SRC_EN |
 			priv->afbcd.ops->fmt_to_blk_mode(fb->modifier,
 							  fb->format->format);
 	} else {
 		switch (fb->format->format) {
 		case DRM_FORMAT_XRGB8888:
 		case DRM_FORMAT_ARGB8888:
-			priv->viu.osd1_blk0_cfg[0] |= OSD_BLK_MODE_32 |
+			osd->blk0_cfg[0] |= OSD_BLK_MODE_32 |
 						OSD_COLOR_MATRIX_32_ARGB;
 			break;
 		case DRM_FORMAT_XBGR8888:
 		case DRM_FORMAT_ABGR8888:
-			priv->viu.osd1_blk0_cfg[0] |= OSD_BLK_MODE_32 |
+			osd->blk0_cfg[0] |= OSD_BLK_MODE_32 |
 						OSD_COLOR_MATRIX_32_ABGR;
 			break;
 		case DRM_FORMAT_RGB888:
-			priv->viu.osd1_blk0_cfg[0] |= OSD_BLK_MODE_24 |
+			osd->blk0_cfg[0] |= OSD_BLK_MODE_24 |
 						OSD_COLOR_MATRIX_24_RGB;
 			break;
 		case DRM_FORMAT_RGB565:
-			priv->viu.osd1_blk0_cfg[0] |= OSD_BLK_MODE_16 |
+			osd->blk0_cfg[0] |= OSD_BLK_MODE_16 |
 						OSD_COLOR_MATRIX_16_RGB565;
 			break;
 		}
@@ -243,12 +327,12 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	case DRM_FORMAT_XRGB8888:
 	case DRM_FORMAT_XBGR8888:
 		/* For XRGB, replace the pixel's alpha by 0xFF */
-		priv->viu.osd1_ctrl_stat2 |= OSD_REPLACE_EN;
+		osd->ctrl_stat2 |= OSD_REPLACE_EN;
 		break;
 	case DRM_FORMAT_ARGB8888:
 	case DRM_FORMAT_ABGR8888:
 		/* For ARGB, use the pixel's alpha */
-		priv->viu.osd1_ctrl_stat2 &= ~OSD_REPLACE_EN;
+		osd->ctrl_stat2 &= ~OSD_REPLACE_EN;
 		break;
 	}
 
@@ -258,7 +342,8 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	hf_bank_len = 4;
 	vf_bank_len = 4;
 
-	if (new_state->crtc->mode.flags & DRM_MODE_FLAG_INTERLACE) {
+	if (!meson_plane->index &&
+	    (new_state->crtc->mode.flags & DRM_MODE_FLAG_INTERLACE)) {
 		vsc_bot_rcv_num = 6;
 		vsc_bot_rpt_p0_num = 2;
 	}
@@ -268,10 +353,16 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	hsc_ini_rpt_p0_num = (hf_bank_len / 2) - 1;
 	vsc_ini_rpt_p0_num = (vf_bank_len / 2) - 1;
 
-	src_w = fixed16_to_int(new_state->src_w);
-	src_h = fixed16_to_int(new_state->src_h);
+	src_w = drm_rect_width(&new_state->src) >> 16;
+	src_h = drm_rect_height(&new_state->src) >> 16;
 	dst_w = new_state->crtc_w;
 	dst_h = new_state->crtc_h;
+	if (meson_plane->index) {
+		meson_plane_blend_size(priv, state, crtc_state, &blend_w, &blend_h);
+		dest = meson_plane_blend_dest(new_state, crtc_state, blend_w, blend_h);
+		dst_w = drm_rect_width(&dest);
+		dst_h = drm_rect_height(&dest);
+	}
 
 	/*
 	 * When the output is interlaced, the OSD must switch between
@@ -280,16 +371,18 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	 * But the vertical scaler can provide such funtionnality if
 	 * is configured for 2:1 scaling with interlace options enabled.
 	 */
-	if (new_state->crtc->mode.flags & DRM_MODE_FLAG_INTERLACE) {
+	if (!meson_plane->index &&
+	    (new_state->crtc->mode.flags & DRM_MODE_FLAG_INTERLACE)) {
 		dest.y1 /= 2;
 		dest.y2 /= 2;
 		dst_h /= 2;
 	}
 
-	hf_phase_step = ((src_w << 18) / dst_w) << 6;
-	vf_phase_step = (src_h << 20) / dst_h;
+	hf_phase_step = div_u64((u64)src_w << 24, dst_w);
+	vf_phase_step = div_u64((u64)src_h << 20, dst_h);
 
-	if (new_state->crtc->mode.flags & DRM_MODE_FLAG_INTERLACE)
+	if (!meson_plane->index &&
+	    (new_state->crtc->mode.flags & DRM_MODE_FLAG_INTERLACE))
 		bot_ini_phase = ((vf_phase_step / 2) >> 4);
 	else
 		bot_ini_phase = 0;
@@ -310,64 +403,65 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 
 	/* In interlaced mode, scaler is always active */
 	if (sc2_interlace || src_h != dst_h || src_w != dst_w) {
-		priv->viu.osd_sc_i_wh_m1 = SCI_WH_M1_W(src_w - 1) |
+		osd->sc_i_wh_m1 = SCI_WH_M1_W(src_w - 1) |
 					   SCI_WH_M1_H(src_h - 1);
-		priv->viu.osd_sc_o_h_start_end = SCO_HV_START(dest.x1) |
+		osd->sc_o_h_start_end = SCO_HV_START(dest.x1) |
 						 SCO_HV_END(dest.x2 - 1);
-		priv->viu.osd_sc_o_v_start_end = SCO_HV_START(dest.y1) |
+		osd->sc_o_v_start_end = SCO_HV_START(dest.y1) |
 						 SCO_HV_END(dest.y2 - 1);
 		/* Enable OSD Scaler */
-		priv->viu.osd_sc_ctrl0 = SC_CTRL0_PATH_EN | SC_CTRL0_SEL_OSD1;
+		osd->sc_ctrl0 = SC_CTRL0_PATH_EN | SC_CTRL0_SEL_OSD1;
 	} else {
-		priv->viu.osd_sc_i_wh_m1 = 0;
-		priv->viu.osd_sc_o_h_start_end = 0;
-		priv->viu.osd_sc_o_v_start_end = 0;
-		priv->viu.osd_sc_ctrl0 = 0;
+		osd->sc_i_wh_m1 = 0;
+		osd->sc_o_h_start_end = 0;
+		osd->sc_o_v_start_end = 0;
+		osd->sc_ctrl0 = 0;
 	}
 
 	/* In interlaced mode, vertical scaler is always active */
 	if (sc2_interlace || src_h != dst_h) {
-		priv->viu.osd_sc_v_ctrl0 =
+		osd->sc_v_ctrl0 =
 					VSC_BANK_LEN(vf_bank_len) |
 					VSC_TOP_INI_RCV_NUM(vsc_ini_rcv_num) |
 					VSC_TOP_RPT_L0_NUM(vsc_ini_rpt_p0_num) |
 					VSC_VERTICAL_SCALER_EN;
 
-		if (new_state->crtc->mode.flags & DRM_MODE_FLAG_INTERLACE)
-			priv->viu.osd_sc_v_ctrl0 |=
+		if (!meson_plane->index &&
+		    (new_state->crtc->mode.flags & DRM_MODE_FLAG_INTERLACE))
+			osd->sc_v_ctrl0 |=
 					VSC_BOT_INI_RCV_NUM(vsc_bot_rcv_num) |
 					VSC_BOT_RPT_L0_NUM(vsc_bot_rpt_p0_num) |
 					VSC_PROG_INTERLACE;
 
 		if (sc2_interlace)
 			/* G12B+ vendor setting for progressive-to-field scaling. */
-			priv->viu.osd_sc_v_ctrl0 |= BIT(25);
+			osd->sc_v_ctrl0 |= BIT(25);
 
-		priv->viu.osd_sc_v_phase_step = SC_PHASE_STEP(vf_phase_step);
-		priv->viu.osd_sc_v_ini_phase = VSC_INI_PHASE_BOT(bot_ini_phase);
+		osd->sc_v_phase_step = SC_PHASE_STEP(vf_phase_step);
+		osd->sc_v_ini_phase = VSC_INI_PHASE_BOT(bot_ini_phase);
 		if (sc2_interlace && src_h == dst_h * 2)
-			priv->viu.osd_sc_v_ini_phase |=
+			osd->sc_v_ini_phase |=
 				VSC_INI_PHASE_TOP(0x8000) |
 				VSC_INI_PHASE_BOT(0x8000);
 	} else {
-		priv->viu.osd_sc_v_ctrl0 = 0;
-		priv->viu.osd_sc_v_phase_step = 0;
-		priv->viu.osd_sc_v_ini_phase = 0;
+		osd->sc_v_ctrl0 = 0;
+		osd->sc_v_phase_step = 0;
+		osd->sc_v_ini_phase = 0;
 	}
 
 	/* Horizontal scaler is only used if width does not match */
 	if (src_w != dst_w) {
-		priv->viu.osd_sc_h_ctrl0 =
+		osd->sc_h_ctrl0 =
 					HSC_BANK_LENGTH(hf_bank_len) |
 					HSC_INI_RCV_NUM0(hsc_ini_rcv_num) |
 					HSC_RPT_P0_NUM0(hsc_ini_rpt_p0_num) |
 					HSC_HORIZ_SCALER_EN;
-		priv->viu.osd_sc_h_phase_step = SC_PHASE_STEP(hf_phase_step);
-		priv->viu.osd_sc_h_ini_phase = 0;
+		osd->sc_h_phase_step = SC_PHASE_STEP(hf_phase_step);
+		osd->sc_h_ini_phase = 0;
 	} else {
-		priv->viu.osd_sc_h_ctrl0 = 0;
-		priv->viu.osd_sc_h_phase_step = 0;
-		priv->viu.osd_sc_h_ini_phase = 0;
+		osd->sc_h_ctrl0 = 0;
+		osd->sc_h_phase_step = 0;
+		osd->sc_h_ini_phase = 0;
 	}
 
 	/*
@@ -375,14 +469,14 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 	 * where x2 is exclusive.
 	 * e.g. +30x1920 would be (1919 << 16) | 30
 	 */
-	priv->viu.osd1_blk0_cfg[1] =
+	osd->blk0_cfg[1] =
 				((fixed16_to_int(new_state->src.x2) - 1) << 16) |
 				fixed16_to_int(new_state->src.x1);
-	priv->viu.osd1_blk0_cfg[2] =
+	osd->blk0_cfg[2] =
 				((fixed16_to_int(new_state->src.y2) - 1) << 16) |
 				fixed16_to_int(new_state->src.y1);
-	priv->viu.osd1_blk0_cfg[3] = ((dest.x2 - 1) << 16) | dest.x1;
-	priv->viu.osd1_blk0_cfg[4] = ((dest.y2 - 1) << 16) | dest.y1;
+	osd->blk0_cfg[3] = ((dest.x2 - 1) << 16) | dest.x1;
+	osd->blk0_cfg[4] = ((dest.y2 - 1) << 16) | dest.y1;
 
 	if (priv->sc2) {
 		/*
@@ -390,40 +484,39 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 		 * scaler. They consume a progressive frame, not a 540-line
 		 * field; only the scaler output and VPP use field coordinates.
 		 */
-		priv->viu.osd1_blk0_cfg[3] = (src_w - 1) << 16;
-		priv->viu.osd1_blk0_cfg[4] = (src_h - 1) << 16;
+		osd->blk0_cfg[3] = (src_w - 1) << 16;
+		osd->blk0_cfg[4] = (src_h - 1) << 16;
 	}
 
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
-		priv->viu.osd_blend_din0_scope_h = ((dest.x2 - 1) << 16) | dest.x1;
-		priv->viu.osd_blend_din0_scope_v = ((dest.y2 - 1) << 16) | dest.y1;
-		priv->viu.osb_blend0_size = dst_h << 16 | dst_w;
-		priv->viu.osb_blend1_size = dst_h << 16 | dst_w;
+		osd->blend_scope_h = ((dest.x2 - 1) << 16) | dest.x1;
+		osd->blend_scope_v = ((dest.y2 - 1) << 16) | dest.y1;
+		osd->blend0_size = dst_h << 16 | dst_w;
+		osd->blend1_size = dst_h << 16 | dst_w;
 
-		if (priv->sc2) {
-			priv->viu.osd_blend_din0_scope_h = (src_w - 1) << 16;
-			priv->viu.osd_blend_din0_scope_v = (src_h - 1) << 16;
-			priv->viu.osb_blend0_size = src_h << 16 | src_w;
-			priv->viu.osb_blend1_size = src_h << 16 | src_w;
+		if (priv->sc2 && !meson_plane->index) {
+			osd->blend_scope_h = (src_w - 1) << 16;
+			osd->blend_scope_v = (src_h - 1) << 16;
+			osd->blend0_size = src_h << 16 | src_w;
+			osd->blend1_size = src_h << 16 | src_w;
 		}
 	}
 
 	/* Update Canvas with buffer address */
 	gem = drm_fb_dma_get_gem_obj(fb, 0);
 
-	priv->viu.osd1_addr = gem->dma_addr;
-	priv->viu.osd1_stride = fb->pitches[0];
-	priv->viu.osd1_height = fb->height;
-	priv->viu.osd1_width = fb->width;
+	osd->addr = gem->dma_addr + fb->offsets[0];
+	osd->stride = fb->pitches[0];
+	osd->height = fb->height;
+	osd->width = fb->width;
+	osd->modifier = fb->modifier;
+	osd->format = fb->format->format;
 
-	if (priv->viu.osd1_afbcd) {
-		priv->afbcd.modifier = fb->modifier;
-		priv->afbcd.format = fb->format->format;
-
+	if (osd->afbcd) {
 		/* Calculate decoder write stride */
 		if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A))
-			priv->viu.osd1_blk2_cfg4 =
-				meson_g12a_afbcd_line_stride(priv);
+			osd->blk2_cfg4 =
+				meson_g12a_afbcd_line_stride(osd);
 	}
 
 	if (!meson_plane->enabled) {
@@ -435,7 +528,7 @@ static void meson_plane_atomic_update(struct drm_plane *plane,
 		meson_plane->enabled = true;
 	}
 
-	priv->viu.osd1_enabled = true;
+	osd->enabled = true;
 
 	spin_unlock_irqrestore(&priv->drm->event_lock, flags);
 }
@@ -445,11 +538,12 @@ static void meson_plane_atomic_disable(struct drm_plane *plane,
 {
 	struct meson_plane *meson_plane = to_meson_plane(plane);
 	struct meson_drm *priv = meson_plane->priv;
+	struct meson_osd_state *osd = &priv->viu.osd[meson_plane->index];
 	unsigned long flags;
 
 	spin_lock_irqsave(&priv->drm->event_lock, flags);
 	meson_plane->enabled = false;
-	priv->viu.osd1_enabled = false;
+	osd->enabled = false;
 	spin_unlock_irqrestore(&priv->drm->event_lock, flags);
 }
 
@@ -565,46 +659,46 @@ static const uint64_t format_modifiers_default[] = {
 
 int meson_plane_create(struct meson_drm *priv)
 {
-	struct meson_plane *meson_plane;
-	struct drm_plane *plane;
-	const uint64_t *format_modifiers = format_modifiers_default;
+	const uint64_t *modifiers = format_modifiers_default;
+	unsigned int index;
 	int ret;
 
-	meson_plane = devm_kzalloc(priv->drm->dev, sizeof(*meson_plane),
-				   GFP_KERNEL);
-	if (!meson_plane)
-		return -ENOMEM;
-
-	meson_plane->priv = priv;
-	plane = &meson_plane->base;
-
 	if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_GXM))
-		format_modifiers = format_modifiers_afbc_gxm;
+		modifiers = format_modifiers_afbc_gxm;
 	else if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A))
-		format_modifiers = format_modifiers_afbc_g12a;
+		modifiers = format_modifiers_afbc_g12a;
 
-	ret = drm_universal_plane_init(priv->drm, plane, 0xFF,
-					&meson_plane_funcs,
-					supported_drm_formats,
-					ARRAY_SIZE(supported_drm_formats),
-					format_modifiers,
-					DRM_PLANE_TYPE_PRIMARY, "meson_primary_plane");
-	if (ret) {
-		devm_kfree(priv->drm->dev, meson_plane);
-		return ret;
-	}
+	for (index = 0; index < (priv->sc2 ? MESON_MAX_OSDS : 1); index++) {
+		struct meson_plane *meson_plane;
+		struct drm_plane *plane;
 
-	drm_plane_helper_add(plane, &meson_plane_helper_funcs);
-	if (priv->sc2) {
-		ret = drm_plane_create_alpha_property(plane);
+		meson_plane = devm_kzalloc(priv->dev, sizeof(*meson_plane), GFP_KERNEL);
+		if (!meson_plane)
+			return -ENOMEM;
+		meson_plane->priv = priv;
+		meson_plane->index = index;
+		plane = &meson_plane->base;
+		ret = drm_universal_plane_init(priv->drm, plane, BIT(0),
+				&meson_plane_funcs, supported_drm_formats,
+				ARRAY_SIZE(supported_drm_formats), modifiers,
+				index ? DRM_PLANE_TYPE_OVERLAY : DRM_PLANE_TYPE_PRIMARY,
+				index ? "meson_osd%u" : "meson_primary_plane", index + 1);
 		if (ret)
 			return ret;
+		drm_plane_helper_add(plane, &meson_plane_helper_funcs);
+		if (priv->sc2) {
+			ret = drm_plane_create_alpha_property(plane);
+			if (ret)
+				return ret;
+		}
+		/* RGB inputs are premultiplied; VD1 < VD2 < OSD1 < OSD2 < OSD3. */
+		ret = drm_plane_create_zpos_immutable_property(plane,
+					priv->sc2 ? index + 2 : 1);
+		if (ret)
+			return ret;
+		priv->osd_planes[index] = plane;
+		if (!index)
+			priv->primary_plane = plane;
 	}
-
-	/* For now, OSD Primary plane is always on the front */
-	drm_plane_create_zpos_immutable_property(plane, priv->sc2 ? 2 : 1);
-
-	priv->primary_plane = plane;
-
 	return 0;
 }

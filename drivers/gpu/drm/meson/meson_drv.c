@@ -166,7 +166,8 @@ static void meson_vpu_init(struct meson_drm *priv)
 				   GENMASK(21, 14) | GENMASK(25, 24) |
 				   GENMASK(31, 30), 0);
 		regmap_update_bits(priv->pwrctrl, 0x5c,
-				   GENMASK(13, 8) | GENMASK(17, 16), 0);
+				   GENMASK(5, 4) | GENMASK(13, 8) |
+				   GENMASK(17, 16), 0);
 		regmap_update_bits(priv->pwrctrl, 0x64, GENMASK(13, 12), 0);
 	}
 
@@ -220,6 +221,7 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 	struct regmap_config map_config = meson_regmap_config;
 	void __iomem *regs;
 	unsigned int video_canvases = 0;
+	unsigned int osd_canvases = 0;
 	int ret, i;
 
 	/* Checks if an output connector is available */
@@ -322,9 +324,12 @@ static int meson_drv_bind_master(struct device *dev, bool has_components)
 		goto free_drm;
 	}
 
-	ret = meson_canvas_alloc(priv->canvas, &priv->canvas_id_osd1);
-	if (ret)
-		goto free_drm;
+	for (i = 0; i < (priv->sc2 ? MESON_MAX_OSDS : 1); i++) {
+		ret = meson_canvas_alloc(priv->canvas, &priv->canvas_id_osd[i]);
+		if (ret)
+			goto free_canvas_vd;
+		osd_canvases++;
+	}
 	for (i = 0; i < (priv->sc2 ? 6 : 3); i++) {
 		ret = meson_canvas_alloc(priv->canvas,
 					 &priv->canvas_id_vd[i / 3][i % 3]);
@@ -442,7 +447,8 @@ free_canvas_vd:
 		meson_canvas_free(priv->canvas,
 			priv->canvas_id_vd[video_canvases / 3][video_canvases % 3]);
 	}
-	meson_canvas_free(priv->canvas, priv->canvas_id_osd1);
+	while (osd_canvases)
+		meson_canvas_free(priv->canvas, priv->canvas_id_osd[--osd_canvases]);
 free_drm:
 	drm_dev_put(drm);
 
@@ -473,7 +479,8 @@ static void meson_drv_unbind(struct device *dev)
 	drm_atomic_helper_shutdown(drm);
 	free_irq(priv->vsync_irq, drm);
 	if (priv->canvas) {
-		meson_canvas_free(priv->canvas, priv->canvas_id_osd1);
+		for (i = 0; i < (priv->sc2 ? MESON_MAX_OSDS : 1); i++)
+			meson_canvas_free(priv->canvas, priv->canvas_id_osd[i]);
 		for (i = 0; i < (priv->sc2 ? 6 : 3); i++)
 			meson_canvas_free(priv->canvas,
 					  priv->canvas_id_vd[i / 3][i % 3]);

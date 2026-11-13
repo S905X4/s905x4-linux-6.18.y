@@ -15,6 +15,7 @@
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_device.h>
+#include <drm/drm_fourcc.h>
 #include <drm/drm_print.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/drm_vblank.h>
@@ -150,6 +151,171 @@ static void meson_crtc_atomic_enable(struct drm_crtc *crtc,
 	drm_crtc_vblank_on(crtc);
 }
 
+static void meson_crtc_write_osd_scaler(struct meson_drm *priv,
+				       unsigned int index,
+				       const struct meson_osd_state *osd)
+{
+	u32 base = meson_osd_regs[index].sc_base;
+
+	/* All three SC2 PPS banks have the same offsets 0..11. */
+	writel_relaxed(osd->sc_v_phase_step, priv->io_base + _REG(base));
+	writel_relaxed(osd->sc_v_ini_phase, priv->io_base + _REG(base + 1));
+	writel_relaxed(osd->sc_v_ctrl0, priv->io_base + _REG(base + 2));
+	writel_relaxed(osd->sc_h_phase_step, priv->io_base + _REG(base + 3));
+	writel_relaxed(osd->sc_h_ini_phase, priv->io_base + _REG(base + 4));
+	writel_relaxed(osd->sc_h_ctrl0, priv->io_base + _REG(base + 5));
+	writel_relaxed(osd->sc_ctrl0, priv->io_base + _REG(base + 8));
+	writel_relaxed(osd->sc_i_wh_m1, priv->io_base + _REG(base + 9));
+	writel_relaxed(osd->sc_o_h_start_end, priv->io_base + _REG(base + 10));
+	writel_relaxed(osd->sc_o_v_start_end, priv->io_base + _REG(base + 11));
+}
+
+static void meson_crtc_sc2_output_scaler(struct meson_drm *priv, bool enabled)
+{
+	const struct drm_display_mode *mode = &priv->crtc->state->mode;
+	u32 base = meson_osd_regs[0].sc_base;
+	bool interlace = enabled && (mode->flags & DRM_MODE_FLAG_INTERLACE);
+
+	if (enabled && priv->viu.osd[0].enabled) {
+		meson_crtc_write_osd_scaler(priv, 0, &priv->viu.osd[0]);
+		return;
+	}
+	/* Without a primary FB, the composition domain is the full mode. */
+	writel_relaxed(interlace ? 2 << 24 : 0, priv->io_base + _REG(base));
+	writel_relaxed(interlace ? 0x80008000 : 0, priv->io_base + _REG(base + 1));
+	writel_relaxed(interlace ? BIT(25) | BIT(24) | BIT(23) |
+			(1 << 16) | (4 << 11) | (1 << 8) | (4 << 3) | 4 : 0,
+			priv->io_base + _REG(base + 2));
+	writel_relaxed(0, priv->io_base + _REG(base + 3));
+	writel_relaxed(0, priv->io_base + _REG(base + 4));
+	writel_relaxed(0, priv->io_base + _REG(base + 5));
+	writel_relaxed(interlace ? BIT(3) | BIT(2) : 0,
+			priv->io_base + _REG(base + 8));
+	writel_relaxed(interlace ? (mode->hdisplay - 1) << 16 |
+			(mode->vdisplay - 1) : 0, priv->io_base + _REG(base + 9));
+	writel_relaxed(interlace ? mode->hdisplay - 1 : 0,
+			priv->io_base + _REG(base + 10));
+	writel_relaxed(interlace ? mode->vdisplay / 2 - 1 : 0,
+			priv->io_base + _REG(base + 11));
+}
+
+static void meson_crtc_sc2_osd_blend(struct meson_drm *priv)
+{
+	const struct drm_display_mode *mode = &priv->crtc->state->mode;
+	u32 size = priv->viu.osd[0].enabled ? priv->viu.osd[0].blend0_size :
+		   mode->vdisplay << 16 | mode->hdisplay;
+	u32 control = VIU_OSD_BLEND_HOLD_LINES(4);
+	unsigned int count = 0, index, input = 0;
+	bool bypass;
+
+	for (index = 0; index < MESON_MAX_OSDS; index++)
+		count += priv->viu.osd[index].enabled;
+	bypass = count == 1 && priv->viu.osd[0].enabled;
+	/* Unused inputs must remain transparent, including the shift workaround. */
+	for (index = 0; index < 4; index++) {
+		writel_relaxed(0, priv->io_base +
+			       _REG(VIU_OSD_BLEND_DIN0_SCOPE_H + index * 2));
+		writel_relaxed(0xffffffff, priv->io_base +
+			       _REG(VIU_OSD_BLEND_DIN0_SCOPE_V + index * 2));
+	}
+	if (!bypass) {
+		/* BSP ABC: DIN0 is top, DIN2 middle, DIN3 bottom. */
+		control |= VIU_OSD_BLEND_BLEN2_PREMULT_EN(3) |
+			   VIU_OSD_BLEND_DIN_EN(5);
+	} else {
+		/* Preserve the deployed single-OSD bypass path. */
+		control |= VIU_OSD_BLEND_BLEN2_PREMULT_EN(1) |
+			   VIU_OSD_BLEND_DIN0_BYPASS_TO_DOUT0 |
+			   VIU_OSD_BLEND1_DIN3_BYPASS_TO_DOUT1 |
+			   VIU_OSD_BLEND1_DOUT_BYPASS_TO_BLEND2;
+	}
+	for (index = MESON_MAX_OSDS; index-- > 0;) {
+		const struct meson_osd_state *osd = &priv->viu.osd[index];
+		unsigned int din;
+
+		if (!osd->enabled)
+			continue;
+		din = !input ? 0 : input == count - 1 ? 3 : 2;
+		input++;
+		control |= VIU_OSD_BLEND_REORDER(din, index + 1) |
+			   VIU_OSD_BLEND_DIN_EN(BIT(din));
+		/* BSP divides premultiplied pixels before blend0/1 multiplication. */
+		writel_bits_relaxed(BIT(28), bypass ?
+			priv->viu.osd1_bypass_alpha_div :
+			(osd->format == DRM_FORMAT_ARGB8888 ||
+			 osd->format == DRM_FORMAT_ABGR8888 ? BIT(28) : 0),
+			priv->io_base + _REG(meson_osd_regs[index].unpack_ctrl));
+		writel_relaxed(osd->blend_scope_h, priv->io_base +
+			       _REG(VIU_OSD_BLEND_DIN0_SCOPE_H + din * 2));
+		writel_relaxed(osd->blend_scope_v, priv->io_base +
+			       _REG(VIU_OSD_BLEND_DIN0_SCOPE_V + din * 2));
+	}
+	writel_relaxed(size, priv->io_base + _REG(VIU_OSD_BLEND_BLEND0_SIZE));
+	writel_relaxed(size, priv->io_base + _REG(VIU_OSD_BLEND_BLEND1_SIZE));
+	writel_relaxed(control, priv->io_base + _REG(VIU_OSD_BLEND_CTRL));
+	writel_relaxed(bypass ? priv->viu.osd1_bypass_blend_ctrl1 :
+			BIT(0) | (3 << 4) | (3 << 16),
+			priv->io_base + _REG(VIU_OSD_BLEND_CTRL1));
+	writel_relaxed(OSD_BLEND_PATH_SEL_ENABLE |
+			(count ? OSD_BLEND_POSTBLD_SRC_OSD1 : 0) |
+			(count && !bypass ? VD_BLEND_POSTBLD_PREMULT_EN : 0),
+			priv->io_base + _REG(OSD1_BLEND_SRC_CTRL));
+	meson_crtc_sc2_output_scaler(priv, count != 0);
+}
+
+static void meson_crtc_sc2_update_osds(struct meson_drm *priv)
+{
+	u32 surface_mask = 0;
+	unsigned int index, word;
+	bool commit = false;
+
+	for (index = 0; index < MESON_MAX_OSDS; index++) {
+		const struct meson_osd_state *osd = &priv->viu.osd[index];
+
+		commit |= osd->commit;
+		if (osd->enabled && osd->afbcd)
+			surface_mask |= BIT(index);
+	}
+	if (!commit)
+		return;
+
+	/* One replay table and one decoder command own the entire OSD commit. */
+	meson_rdma_reset(priv);
+	for (index = 0; index < MESON_MAX_OSDS; index++) {
+		struct meson_osd_state *osd = &priv->viu.osd[index];
+		const struct meson_osd_regs *regs = &meson_osd_regs[index];
+
+		osd->commit = false;
+		if (!osd->enabled) {
+			writel_bits_relaxed(OSD_ENABLE | OSD_BLK0_ENABLE, 0,
+					    priv->io_base + _REG(regs->ctrl_stat));
+			meson_viu_osd_afbc_select(priv, index, false);
+			if (index)
+				writel_relaxed(0, priv->io_base + _REG(regs->sc_base + 8));
+			continue;
+		}
+		writel_relaxed(osd->ctrl_stat | (osd->afbcd ? OSD_MEM_LINEAR_ADDR : 0),
+			       priv->io_base + _REG(regs->ctrl_stat));
+		writel_relaxed(osd->ctrl_stat2, priv->io_base + _REG(regs->ctrl_stat2));
+		for (word = 0; word < ARRAY_SIZE(regs->blk0_cfg); word++)
+			writel_relaxed(osd->blk0_cfg[word],
+				       priv->io_base + _REG(regs->blk0_cfg[word]));
+		if (osd->afbcd) {
+			writel_relaxed(osd->blk1_cfg4, priv->io_base + _REG(regs->blk1_cfg4));
+			writel_relaxed(osd->blk2_cfg4, priv->io_base + _REG(regs->blk2_cfg4));
+		} else {
+			meson_canvas_config(priv->canvas, priv->canvas_id_osd[index],
+				osd->addr, osd->stride, osd->height,
+				MESON_CANVAS_WRAP_NONE, MESON_CANVAS_BLKMODE_LINEAR, 0);
+		}
+		meson_viu_osd_afbc_select(priv, index, osd->afbcd);
+		if (index)
+			meson_crtc_write_osd_scaler(priv, index, osd);
+	}
+	meson_crtc_sc2_osd_blend(priv);
+	meson_afbcd_sc2_update(priv, surface_mask);
+}
+
 static void meson_crtc_disable_osd1(struct meson_crtc *meson_crtc)
 {
 	struct meson_drm *priv = meson_crtc->priv;
@@ -215,9 +381,17 @@ static void meson_crtc_atomic_disable(struct drm_crtc *crtc,
 	drm_crtc_vblank_off(crtc);
 
 	spin_lock_irq(&crtc->dev->event_lock);
-	priv->viu.osd1_enabled = false;
-	priv->viu.osd1_commit = false;
-	meson_crtc_disable_osd1(meson_crtc);
+	if (priv->sc2) {
+		for (i = 0; i < MESON_MAX_OSDS; i++) {
+			priv->viu.osd[i].enabled = false;
+			priv->viu.osd[i].commit = true;
+		}
+		meson_crtc_sc2_update_osds(priv);
+	} else {
+		priv->viu.osd[0].enabled = false;
+		priv->viu.osd[0].commit = false;
+		meson_crtc_disable_osd1(meson_crtc);
+	}
 	for (i = 0; i < (priv->sc2 ? 2 : 1); i++) {
 		priv->viu.video[i].enabled = false;
 		priv->viu.video[i].commit = false;
@@ -256,8 +430,9 @@ static void meson_crtc_atomic_flush(struct drm_crtc *crtc,
 	 * shadow, so the IRQ must not signal this flip before atomic_flush.
 	 */
 	spin_lock_irqsave(&crtc->dev->event_lock, flags);
-	if (drm_atomic_get_new_plane_state(state, priv->primary_plane))
-		priv->viu.osd1_commit = true;
+	for (i = 0; i < (priv->sc2 ? MESON_MAX_OSDS : 1); i++)
+		if (drm_atomic_get_new_plane_state(state, priv->osd_planes[i]))
+			priv->viu.osd[i].commit = true;
 	for (i = 0; i < (priv->sc2 ? 2 : 1); i++)
 		if (drm_atomic_get_new_plane_state(state, priv->overlay_planes[i]))
 			priv->viu.video[i].commit = true;
@@ -288,13 +463,13 @@ static void meson_crtc_enable_osd1(struct meson_drm *priv)
 
 static void meson_crtc_g12a_enable_osd1_afbc(struct meson_drm *priv)
 {
-	writel_relaxed(priv->viu.osd1_blk2_cfg4,
+	writel_relaxed(priv->viu.osd[0].blk2_cfg4,
 		       priv->io_base + _REG(VIU_OSD1_BLK2_CFG_W4));
 
 	writel_bits_relaxed(OSD_MEM_LINEAR_ADDR, OSD_MEM_LINEAR_ADDR,
 			    priv->io_base + _REG(VIU_OSD1_CTRL_STAT));
 
-	writel_relaxed(priv->viu.osd1_blk1_cfg4,
+	writel_relaxed(priv->viu.osd[0].blk1_cfg4,
 		       priv->io_base + _REG(VIU_OSD1_BLK1_CFG_W4));
 
 	meson_viu_g12a_enable_osd1_afbc(priv);
@@ -308,16 +483,16 @@ static void meson_crtc_g12a_enable_osd1_afbc(struct meson_drm *priv)
 
 static void meson_g12a_crtc_enable_osd1(struct meson_drm *priv)
 {
-	writel_relaxed(priv->viu.osd_blend_din0_scope_h,
+	writel_relaxed(priv->viu.osd[0].blend_scope_h,
 		       priv->io_base +
 		       _REG(VIU_OSD_BLEND_DIN0_SCOPE_H));
-	writel_relaxed(priv->viu.osd_blend_din0_scope_v,
+	writel_relaxed(priv->viu.osd[0].blend_scope_v,
 		       priv->io_base +
 		       _REG(VIU_OSD_BLEND_DIN0_SCOPE_V));
-	writel_relaxed(priv->viu.osb_blend0_size,
+	writel_relaxed(priv->viu.osd[0].blend0_size,
 		       priv->io_base +
 		       _REG(VIU_OSD_BLEND_BLEND0_SIZE));
-	writel_relaxed(priv->viu.osb_blend1_size,
+	writel_relaxed(priv->viu.osd[0].blend1_size,
 		       priv->io_base +
 		       _REG(VIU_OSD_BLEND_BLEND1_SIZE));
 	writel_bits_relaxed(3 << 8, 3 << 8,
@@ -598,29 +773,31 @@ void meson_crtc_irq(struct meson_drm *priv)
 	drm_crtc_handle_vblank(priv->crtc);
 
 	spin_lock_irqsave(&priv->drm->event_lock, flags);
-	if (priv->viu.osd1_commit && !priv->viu.osd1_enabled) {
+	if (priv->sc2)
+		meson_crtc_sc2_update_osds(priv);
+	if (!priv->sc2 && priv->viu.osd[0].commit && !priv->viu.osd[0].enabled) {
 		meson_crtc_disable_osd1(meson_crtc);
-		priv->viu.osd1_commit = false;
+		priv->viu.osd[0].commit = false;
 	}
 
 	/* Update the OSD registers */
-	if (priv->viu.osd1_enabled && priv->viu.osd1_commit) {
-		writel_relaxed(priv->viu.osd1_ctrl_stat,
+	if (!priv->sc2 && priv->viu.osd[0].enabled && priv->viu.osd[0].commit) {
+		writel_relaxed(priv->viu.osd[0].ctrl_stat,
 				priv->io_base + _REG(VIU_OSD1_CTRL_STAT));
-		writel_relaxed(priv->viu.osd1_ctrl_stat2,
+		writel_relaxed(priv->viu.osd[0].ctrl_stat2,
 				priv->io_base + _REG(VIU_OSD1_CTRL_STAT2));
-		writel_relaxed(priv->viu.osd1_blk0_cfg[0],
+		writel_relaxed(priv->viu.osd[0].blk0_cfg[0],
 				priv->io_base + _REG(VIU_OSD1_BLK0_CFG_W0));
-		writel_relaxed(priv->viu.osd1_blk0_cfg[1],
+		writel_relaxed(priv->viu.osd[0].blk0_cfg[1],
 				priv->io_base + _REG(VIU_OSD1_BLK0_CFG_W1));
-		writel_relaxed(priv->viu.osd1_blk0_cfg[2],
+		writel_relaxed(priv->viu.osd[0].blk0_cfg[2],
 				priv->io_base + _REG(VIU_OSD1_BLK0_CFG_W2));
-		writel_relaxed(priv->viu.osd1_blk0_cfg[3],
+		writel_relaxed(priv->viu.osd[0].blk0_cfg[3],
 				priv->io_base + _REG(VIU_OSD1_BLK0_CFG_W3));
-		writel_relaxed(priv->viu.osd1_blk0_cfg[4],
+		writel_relaxed(priv->viu.osd[0].blk0_cfg[4],
 				priv->io_base + _REG(VIU_OSD1_BLK0_CFG_W4));
 
-		if (priv->viu.osd1_afbcd) {
+		if (priv->viu.osd[0].afbcd) {
 			if (meson_crtc->enable_osd1_afbc)
 				meson_crtc->enable_osd1_afbc(priv);
 		} else if (meson_crtc->osd1_afbcd) {
@@ -630,32 +807,32 @@ void meson_crtc_irq(struct meson_drm *priv)
 			priv->afbcd.ops->disable(priv);
 		}
 
-		writel_relaxed(priv->viu.osd_sc_ctrl0,
+		writel_relaxed(priv->viu.osd[0].sc_ctrl0,
 				priv->io_base + _REG(VPP_OSD_SC_CTRL0));
-		writel_relaxed(priv->viu.osd_sc_i_wh_m1,
+		writel_relaxed(priv->viu.osd[0].sc_i_wh_m1,
 				priv->io_base + _REG(VPP_OSD_SCI_WH_M1));
-		writel_relaxed(priv->viu.osd_sc_o_h_start_end,
+		writel_relaxed(priv->viu.osd[0].sc_o_h_start_end,
 				priv->io_base + _REG(VPP_OSD_SCO_H_START_END));
-		writel_relaxed(priv->viu.osd_sc_o_v_start_end,
+		writel_relaxed(priv->viu.osd[0].sc_o_v_start_end,
 				priv->io_base + _REG(VPP_OSD_SCO_V_START_END));
-		writel_relaxed(priv->viu.osd_sc_v_ini_phase,
+		writel_relaxed(priv->viu.osd[0].sc_v_ini_phase,
 				priv->io_base + _REG(VPP_OSD_VSC_INI_PHASE));
-		writel_relaxed(priv->viu.osd_sc_v_phase_step,
+		writel_relaxed(priv->viu.osd[0].sc_v_phase_step,
 				priv->io_base + _REG(VPP_OSD_VSC_PHASE_STEP));
-		writel_relaxed(priv->viu.osd_sc_h_ini_phase,
+		writel_relaxed(priv->viu.osd[0].sc_h_ini_phase,
 				priv->io_base + _REG(VPP_OSD_HSC_INI_PHASE));
-		writel_relaxed(priv->viu.osd_sc_h_phase_step,
+		writel_relaxed(priv->viu.osd[0].sc_h_phase_step,
 				priv->io_base + _REG(VPP_OSD_HSC_PHASE_STEP));
-		writel_relaxed(priv->viu.osd_sc_h_ctrl0,
+		writel_relaxed(priv->viu.osd[0].sc_h_ctrl0,
 				priv->io_base + _REG(VPP_OSD_HSC_CTRL0));
-		writel_relaxed(priv->viu.osd_sc_v_ctrl0,
+		writel_relaxed(priv->viu.osd[0].sc_v_ctrl0,
 				priv->io_base + _REG(VPP_OSD_VSC_CTRL0));
 
-		if (!priv->viu.osd1_afbcd)
-			meson_canvas_config(priv->canvas, priv->canvas_id_osd1,
-					    priv->viu.osd1_addr,
-					    priv->viu.osd1_stride,
-					    priv->viu.osd1_height,
+		if (!priv->viu.osd[0].afbcd)
+			meson_canvas_config(priv->canvas, priv->canvas_id_osd[0],
+					    priv->viu.osd[0].addr,
+					    priv->viu.osd[0].stride,
+					    priv->viu.osd[0].height,
 					    MESON_CANVAS_WRAP_NONE,
 					    MESON_CANVAS_BLKMODE_LINEAR, 0);
 
@@ -663,7 +840,7 @@ void meson_crtc_irq(struct meson_drm *priv)
 		if (meson_crtc->enable_osd1)
 			meson_crtc->enable_osd1(priv);
 
-		if (priv->viu.osd1_afbcd) {
+		if (priv->viu.osd[0].afbcd) {
 			/* SC2 does not need the G12A per-frame reset workaround. */
 			if (!priv->sc2 || !meson_crtc->osd1_afbcd)
 				priv->afbcd.ops->reset(priv);
@@ -671,9 +848,9 @@ void meson_crtc_irq(struct meson_drm *priv)
 			priv->afbcd.ops->enable(priv);
 		}
 
-		meson_crtc->osd1_afbcd = priv->viu.osd1_afbcd;
+		meson_crtc->osd1_afbcd = priv->viu.osd[0].afbcd;
 
-		priv->viu.osd1_commit = false;
+		priv->viu.osd[0].commit = false;
 	}
 
 	for (i = 0; i < (priv->sc2 ? 2 : 1); i++)
@@ -700,7 +877,8 @@ void meson_crtc_irq(struct meson_drm *priv)
 			       priv->io_base + _REG(pps->vsc_phase_ctrl));
 	}
 
-	meson_crtc->vsync_forced = meson_crtc->osd1_afbcd ||
+	meson_crtc->vsync_forced = (priv->sc2 ? priv->afbcd.active_mask != 0 :
+		meson_crtc->osd1_afbcd) ||
 		meson_crtc->video[0].interlace || meson_crtc->video[1].interlace;
 	if (meson_crtc->event) {
 		drm_crtc_send_vblank_event(priv->crtc, meson_crtc->event);
