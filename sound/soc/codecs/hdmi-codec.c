@@ -278,12 +278,18 @@ static const struct hdmi_codec_cea_spk_alloc hdmi_codec_channel_alloc[] = {
 	  .mask = FL | FR | LFE },
 };
 
+struct hdmi_codec_chmap {
+	struct hdmi_codec_priv *hcp;
+	struct snd_pcm_chmap *info;
+	unsigned int index;
+};
+
 struct hdmi_codec_priv {
 	struct hdmi_codec_pdata hcd;
 	uint8_t eld[MAX_ELD_BYTES];
 	struct snd_parsed_hdmi_eld eld_parsed;
-	struct snd_pcm_chmap *chmap_info;
-	unsigned int chmap_idx;
+	/* Indexed by DAI_ID_I2S and DAI_ID_SPDIF. */
+	struct hdmi_codec_chmap chmap[2];
 	struct mutex lock;
 	bool busy;
 	struct snd_soc_jack *jack;
@@ -343,15 +349,21 @@ static void hdmi_codec_eld_chmap(struct hdmi_codec_priv *hcp)
 {
 	u8 spk_alloc;
 	unsigned long spk_mask;
+	unsigned int i;
 
 	spk_alloc = drm_eld_get_spk_alloc(hcp->eld);
 	spk_mask = hdmi_codec_spk_mask_from_alloc(spk_alloc);
 
-	/* Detect if only stereo supported, else return 8 channels mappings */
-	if ((spk_mask & ~(FL | FR)) && hcp->chmap_info->max_channels > 2)
-		hcp->chmap_info->chmap = hdmi_codec_8ch_chmaps;
-	else
-		hcp->chmap_info->chmap = hdmi_codec_stereo_chmaps;
+	for (i = 0; i < ARRAY_SIZE(hcp->chmap); i++) {
+		struct snd_pcm_chmap *info = hcp->chmap[i].info;
+
+		if (!info)
+			continue;
+		if ((spk_mask & ~(FL | FR)) && info->max_channels > 2)
+			info->chmap = hdmi_codec_8ch_chmaps;
+		else
+			info->chmap = hdmi_codec_stereo_chmaps;
+	}
 }
 
 static int hdmi_codec_get_ch_alloc_table_idx(struct hdmi_codec_priv *hcp,
@@ -381,20 +393,24 @@ static int hdmi_codec_get_ch_alloc_table_idx(struct hdmi_codec_priv *hcp,
 static int hdmi_codec_chmap_ctl_get(struct snd_kcontrol *kcontrol,
 			      struct snd_ctl_elem_value *ucontrol)
 {
-	unsigned const char *map;
-	unsigned int i;
+	const struct snd_pcm_chmap_elem *table;
+	unsigned int i, index;
 	struct snd_pcm_chmap *info = snd_kcontrol_chip(kcontrol);
-	struct hdmi_codec_priv *hcp = info->private_data;
+	struct hdmi_codec_chmap *chmap = info->private_data;
+	struct hdmi_codec_priv *hcp = chmap->hcp;
 
-	if (hcp->chmap_idx != HDMI_CODEC_CHMAP_IDX_UNKNOWN)
-		map = info->chmap[hcp->chmap_idx].map;
-
-	for (i = 0; i < info->max_channels; i++) {
-		if (hcp->chmap_idx == HDMI_CODEC_CHMAP_IDX_UNKNOWN)
-			ucontrol->value.integer.value[i] = 0;
-		else
-			ucontrol->value.integer.value[i] = map[i];
-	}
+	mutex_lock(&hcp->lock);
+	table = info->chmap;
+	index = READ_ONCE(chmap->index);
+	/* ELD may have reduced a formerly multichannel map to stereo. */
+	if ((table == hdmi_codec_stereo_chmaps && index != 0) ||
+	    (table == hdmi_codec_8ch_chmaps &&
+	     index >= ARRAY_SIZE(hdmi_codec_8ch_chmaps) - 1))
+		index = HDMI_CODEC_CHMAP_IDX_UNKNOWN;
+	for (i = 0; i < info->max_channels; i++)
+		ucontrol->value.integer.value[i] =
+			index == HDMI_CODEC_CHMAP_IDX_UNKNOWN ? 0 : table[index].map[i];
+	mutex_unlock(&hcp->lock);
 
 	return 0;
 }
@@ -449,8 +465,10 @@ static int hdmi_codec_startup(struct snd_pcm_substream *substream,
 {
 	struct hdmi_codec_priv *hcp = snd_soc_dai_get_drvdata(dai);
 	bool tx = substream->stream == SNDRV_PCM_STREAM_PLAYBACK;
-	bool has_capture = !hcp->hcd.no_i2s_capture;
-	bool has_playback = !hcp->hcd.no_i2s_playback;
+	bool has_capture = !(dai->id == DAI_ID_SPDIF ?
+		hcp->hcd.no_spdif_capture : hcp->hcd.no_i2s_capture);
+	bool has_playback = !(dai->id == DAI_ID_SPDIF ?
+		hcp->hcd.no_spdif_playback : hcp->hcd.no_i2s_playback);
 	int ret = 0;
 
 	if (!((has_playback && tx) || (has_capture && !tx)))
@@ -478,9 +496,12 @@ static int hdmi_codec_startup(struct snd_pcm_substream *substream,
 		snd_parse_eld(dai->dev, &hcp->eld_parsed,
 			      hcp->eld, sizeof(hcp->eld));
 
-		ret = snd_pcm_hw_constraint_eld(substream->runtime, hcp->eld);
-		if (ret)
-			goto err;
+		/* S/PDIF carries IEC61937 rates, not ELD LPCM sample rates. */
+		if (dai->id == DAI_ID_I2S) {
+			ret = snd_pcm_hw_constraint_eld(substream->runtime, hcp->eld);
+			if (ret)
+				goto err;
+		}
 
 		/* Select chmap supported */
 		hdmi_codec_eld_chmap(hcp);
@@ -498,13 +519,15 @@ static void hdmi_codec_shutdown(struct snd_pcm_substream *substream,
 {
 	struct hdmi_codec_priv *hcp = snd_soc_dai_get_drvdata(dai);
 	bool tx = substream->stream == SNDRV_PCM_STREAM_PLAYBACK;
-	bool has_capture = !hcp->hcd.no_i2s_capture;
-	bool has_playback = !hcp->hcd.no_i2s_playback;
+	bool has_capture = !(dai->id == DAI_ID_SPDIF ?
+		hcp->hcd.no_spdif_capture : hcp->hcd.no_i2s_capture);
+	bool has_playback = !(dai->id == DAI_ID_SPDIF ?
+		hcp->hcd.no_spdif_playback : hcp->hcd.no_i2s_playback);
 
 	if (!((has_playback && tx) || (has_capture && !tx)))
 		return;
 
-	hcp->chmap_idx = HDMI_CODEC_CHMAP_IDX_UNKNOWN;
+	WRITE_ONCE(hcp->chmap[dai->id].index, HDMI_CODEC_CHMAP_IDX_UNKNOWN);
 	hcp->hcd.ops->audio_shutdown(dai->dev->parent, hcp->hcd.data);
 
 	mutex_lock(&hcp->lock);
@@ -530,7 +553,8 @@ static int hdmi_codec_fill_codec_params(struct snd_soc_dai *dai,
 		if (idx < 0) {
 			dev_err(dai->dev, "Not able to map channels to speakers (%d)\n",
 				idx);
-			hcp->chmap_idx = HDMI_CODEC_CHMAP_IDX_UNKNOWN;
+			WRITE_ONCE(hcp->chmap[dai->id].index,
+				   HDMI_CODEC_CHMAP_IDX_UNKNOWN);
 			return idx;
 		}
 
@@ -556,9 +580,9 @@ static int hdmi_codec_fill_codec_params(struct snd_soc_dai *dai,
 	hp->channels = channels;
 
 	if (pcm_audio)
-		hcp->chmap_idx = ca_id;
+		WRITE_ONCE(hcp->chmap[dai->id].index, ca_id);
 	else
-		hcp->chmap_idx = HDMI_CODEC_CHMAP_IDX_UNKNOWN;
+		WRITE_ONCE(hcp->chmap[dai->id].index, HDMI_CODEC_CHMAP_IDX_UNKNOWN);
 
 	return 0;
 }
@@ -800,22 +824,24 @@ static int hdmi_codec_pcm_new(struct snd_soc_pcm_runtime *rtd,
 {
 	struct snd_soc_dai_driver *drv = dai->driver;
 	struct hdmi_codec_priv *hcp = snd_soc_dai_get_drvdata(dai);
+	struct hdmi_codec_chmap *chmap = &hcp->chmap[dai->id];
 	unsigned int i;
 	int ret;
 
 	ret =  snd_pcm_add_chmap_ctls(rtd->pcm, SNDRV_PCM_STREAM_PLAYBACK,
 				      NULL, drv->playback.channels_max, 0,
-				      &hcp->chmap_info);
+				      &chmap->info);
 	if (ret < 0)
 		return ret;
 
 	/* override handlers */
-	hcp->chmap_info->private_data = hcp;
-	hcp->chmap_info->kctl->get = hdmi_codec_chmap_ctl_get;
+	chmap->hcp = hcp;
+	chmap->info->private_data = chmap;
+	chmap->info->kctl->get = hdmi_codec_chmap_ctl_get;
 
 	/* default chmap supported is stereo */
-	hcp->chmap_info->chmap = hdmi_codec_stereo_chmaps;
-	hcp->chmap_idx = HDMI_CODEC_CHMAP_IDX_UNKNOWN;
+	chmap->info->chmap = hdmi_codec_stereo_chmaps;
+	chmap->index = HDMI_CODEC_CHMAP_IDX_UNKNOWN;
 
 	for (i = 0; i < ARRAY_SIZE(hdmi_codec_controls); i++) {
 		struct snd_kcontrol *kctl;

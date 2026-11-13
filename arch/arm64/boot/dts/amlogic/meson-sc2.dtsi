@@ -421,7 +421,7 @@
 			reset-names = "hdmitx_apb", "hdmitx", "hdmitx_phy", "vid_pll_div";
 			#address-cells = <1>;
 			#size-cells = <0>;
-			#sound-dai-cells = <0>;
+			#sound-dai-cells = <1>;
 			status = "disabled";
 
 			port@0 {

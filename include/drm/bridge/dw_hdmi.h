@@ -132,6 +132,9 @@ struct dw_hdmi_plat_data {
 	bool use_drm_infoframe;
 	bool ycbcr_420_allowed;
 
+	/* The controller S/PDIF input is connected to an audio producer. */
+	bool spdif_input;
+
 	/*
 	 * Private data passed to all the .mode_valid() and .configure_phy()
 	 * callback functions.

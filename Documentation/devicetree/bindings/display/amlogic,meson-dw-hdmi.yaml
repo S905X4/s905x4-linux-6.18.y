@@ -19,6 +19,8 @@ allOf:
             const: amlogic,meson-sc2-dw-hdmi
     then:
       properties:
+        "#sound-dai-cells":
+          const: 1
         reg:
           minItems: 2
         resets:
@@ -29,6 +31,8 @@ allOf:
         - reg-names
     else:
       properties:
+        "#sound-dai-cells":
+          const: 0
         reg:
           maxItems: 1
         resets:
@@ -143,7 +147,7 @@ properties:
     const: 0
 
   "#sound-dai-cells":
-    const: 0
+    enum: [0, 1]
 
   sound-name-prefix: true
 

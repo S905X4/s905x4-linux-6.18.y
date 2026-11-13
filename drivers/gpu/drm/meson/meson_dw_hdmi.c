@@ -789,6 +789,7 @@ static int meson_dw_hdmi_bind(struct device *dev, struct device *master,
 	meson_dw_hdmi->dev = dev;
 	meson_dw_hdmi->data = match;
 	dw_plat_data = &meson_dw_hdmi->dw_plat_data;
+	dw_plat_data->spdif_input = priv->sc2;
 
 	ret = devm_regulator_get_enable_optional(dev, "hdmi");
 	if (ret < 0 && ret != -ENODEV)

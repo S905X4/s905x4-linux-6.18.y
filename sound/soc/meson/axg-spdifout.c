@@ -5,11 +5,14 @@
 
 #include <linux/clk.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/unaligned.h>
 #include <linux/of_platform.h>
 #include <linux/regmap.h>
 #include <linux/reset.h>
 #include <sound/soc.h>
 #include <sound/soc-dai.h>
+#include <sound/asoundef.h>
 #include <sound/pcm_params.h>
 #include <sound/pcm_iec958.h>
 
@@ -61,6 +64,10 @@ struct axg_spdifout {
 	struct clk *mclk;
 	struct clk *pclk;
 	const struct axg_spdifout_match_data *data;
+	struct mutex lock;
+	u8 cs[AES_IEC958_STATUS_SIZE];
+	bool non_pcm;
+	bool muted;
 };
 
 struct axg_spdifout_match_data {
@@ -118,11 +125,18 @@ static int axg_spdifout_mute(struct snd_soc_dai *dai, int mute, int direction)
 {
 	struct axg_spdifout *priv = snd_soc_dai_get_drvdata(dai);
 
-	/* Use spdif valid bit to perform digital mute */
-	regmap_update_bits(priv->map, SPDIFOUT_CTRL0, SPDIFOUT_CTRL0_VSET,
-			   mute ? SPDIFOUT_CTRL0_VSET : 0);
+	int ret;
 
-	return 0;
+	/* Raw IEC61937 data must stay invalid as PCM, even when unmuted. */
+	mutex_lock(&priv->lock);
+	priv->muted = mute;
+	ret = regmap_update_bits(priv->map, SPDIFOUT_CTRL0,
+				 SPDIFOUT_CTRL0_VSET,
+				 (priv->muted || priv->non_pcm) ?
+				 SPDIFOUT_CTRL0_VSET : 0);
+	mutex_unlock(&priv->lock);
+
+	return ret;
 }
 
 static int axg_spdifout_sample_fmt(struct snd_pcm_hw_params *params,
@@ -182,40 +196,52 @@ static int axg_spdifout_sample_fmt(struct snd_pcm_hw_params *params,
 	return 0;
 }
 
-static int axg_spdifout_set_chsts(struct snd_pcm_hw_params *params,
-				  struct snd_soc_dai *dai)
+static int axg_spdifout_prepare(struct snd_pcm_substream *substream,
+			      struct snd_soc_dai *dai)
 {
 	struct axg_spdifout *priv = snd_soc_dai_get_drvdata(dai);
-	unsigned int offset;
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	u8 cs[AES_IEC958_STATUS_SIZE];
+	bool non_pcm;
+	unsigned int i;
 	int ret;
-	u8 cs[4];
-	u32 val;
 
-	ret = snd_pcm_create_iec958_consumer_hw_params(params, cs, 4);
-	if (ret < 0) {
-		dev_err(dai->dev, "Creating IEC958 channel status failed %d\n",
-			ret);
-		return ret;
+	mutex_lock(&priv->lock);
+	memcpy(cs, priv->cs, sizeof(cs));
+	ret = snd_pcm_fill_iec958_consumer(runtime, cs, sizeof(cs));
+	if (ret < 0)
+		goto out;
+
+	non_pcm = cs[0] & IEC958_AES0_NONAUDIO;
+	if (non_pcm &&
+	    (runtime->channels != 2 || snd_pcm_format_width(runtime->format) != 16 ||
+	     (cs[3] & IEC958_AES3_CON_FS) == IEC958_AES3_CON_FS_768000 ||
+	     (cs[3] & IEC958_AES3_CON_FS) == IEC958_AES3_CON_FS_705600)) {
+		ret = -EINVAL;
+		goto out;
 	}
-	val = cs[0] | cs[1] << 8 | cs[2] << 16 | cs[3] << 24;
 
-	/* Setup channel status A bits [31 - 0]*/
-	regmap_write(priv->map, SPDIFOUT_CHSTS0, val);
+	/* Both channels carry the selected 192-bit consumer status block. */
+	for (i = 0; i < sizeof(cs) / sizeof(u32); i++) {
+		u32 val = get_unaligned_le32(cs + i * sizeof(u32));
 
-	/* Clear channel status A bits [191 - 32] */
-	for (offset = SPDIFOUT_CHSTS1; offset <= SPDIFOUT_CHSTS5;
-	     offset += regmap_get_reg_stride(priv->map))
-		regmap_write(priv->map, offset, 0);
-
-	/* Setup channel status B bits [31 - 0]*/
-	regmap_write(priv->map, SPDIFOUT_CHSTS6, val);
-
-	/* Clear channel status B bits [191 - 32] */
-	for (offset = SPDIFOUT_CHSTS7; offset <= SPDIFOUT_CHSTSB;
-	     offset += regmap_get_reg_stride(priv->map))
-		regmap_write(priv->map, offset, 0);
-
-	return 0;
+		ret = regmap_write(priv->map, SPDIFOUT_CHSTS0 + i * 4, val);
+		if (ret)
+			goto out;
+		ret = regmap_write(priv->map, SPDIFOUT_CHSTS6 + i * 4, val);
+		if (ret)
+			goto out;
+	}
+	ret = regmap_update_bits(priv->map, SPDIFOUT_CTRL0,
+				 SPDIFOUT_CTRL0_CHSTS_SEL |
+				 SPDIFOUT_CTRL0_VSEL | SPDIFOUT_CTRL0_VSET,
+				 (priv->muted || non_pcm) ?
+				 SPDIFOUT_CTRL0_VSET : 0);
+	if (!ret)
+		priv->non_pcm = non_pcm;
+out:
+	mutex_unlock(&priv->lock);
+	return ret;
 }
 
 static int axg_spdifout_hw_params(struct snd_pcm_substream *substream,
@@ -236,12 +262,6 @@ static int axg_spdifout_hw_params(struct snd_pcm_substream *substream,
 	ret = axg_spdifout_sample_fmt(params, dai);
 	if (ret) {
 		dev_err(dai->dev, "failed to setup sample format\n");
-		return ret;
-	}
-
-	ret = axg_spdifout_set_chsts(params, dai);
-	if (ret) {
-		dev_err(dai->dev, "failed to setup channel status words\n");
 		return ret;
 	}
 
@@ -293,6 +313,7 @@ static const struct snd_soc_dai_ops axg_spdifout_ops = {
 	.trigger	= axg_spdifout_trigger,
 	.mute_stream	= axg_spdifout_mute,
 	.hw_params	= axg_spdifout_hw_params,
+	.prepare	= axg_spdifout_prepare,
 	.startup	= axg_spdifout_startup,
 	.shutdown	= axg_spdifout_shutdown,
 	.no_capture_mute = 1,
@@ -345,7 +366,70 @@ static const struct snd_soc_dapm_route axg_spdifout_dapm_routes[] = {
 	{ "Playback", NULL, "SRC SEL" },
 };
 
+static int axg_spdifout_iec958_info(struct snd_kcontrol *kcontrol,
+				  struct snd_ctl_elem_info *uinfo)
+{
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_IEC958;
+	uinfo->count = 1;
+	return 0;
+}
+
+static int axg_spdifout_iec958_mask_get(struct snd_kcontrol *kcontrol,
+				      struct snd_ctl_elem_value *ucontrol)
+{
+	memset(ucontrol->value.iec958.status, 0xff, AES_IEC958_STATUS_SIZE);
+	ucontrol->value.iec958.status[0] &= ~IEC958_AES0_PROFESSIONAL;
+	return 0;
+}
+
+static int axg_spdifout_iec958_get(struct snd_kcontrol *kcontrol,
+				 struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *c = snd_kcontrol_chip(kcontrol);
+	struct axg_spdifout *priv = snd_soc_component_get_drvdata(c);
+
+	mutex_lock(&priv->lock);
+	memcpy(ucontrol->value.iec958.status, priv->cs, sizeof(priv->cs));
+	mutex_unlock(&priv->lock);
+	return 0;
+}
+
+static int axg_spdifout_iec958_put(struct snd_kcontrol *kcontrol,
+				 struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *c = snd_kcontrol_chip(kcontrol);
+	struct axg_spdifout *priv = snd_soc_component_get_drvdata(c);
+	int changed;
+
+	if (ucontrol->value.iec958.status[0] & IEC958_AES0_PROFESSIONAL)
+		return -EINVAL;
+
+	mutex_lock(&priv->lock);
+	changed = memcmp(priv->cs, ucontrol->value.iec958.status,
+			 sizeof(priv->cs)) != 0;
+	if (changed)
+		memcpy(priv->cs, ucontrol->value.iec958.status, sizeof(priv->cs));
+	mutex_unlock(&priv->lock);
+	return changed;
+}
+
 static const struct snd_kcontrol_new axg_spdifout_controls[] = {
+	{
+		.access = SNDRV_CTL_ELEM_ACCESS_READ,
+		.iface = SNDRV_CTL_ELEM_IFACE_PCM,
+		.device = 0,
+		.name = SNDRV_CTL_NAME_IEC958("", PLAYBACK, MASK),
+		.info = axg_spdifout_iec958_info,
+		.get = axg_spdifout_iec958_mask_get,
+	},
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_PCM,
+		.device = 0,
+		.name = SNDRV_CTL_NAME_IEC958("", PLAYBACK, DEFAULT),
+		.info = axg_spdifout_iec958_info,
+		.get = axg_spdifout_iec958_get,
+		.put = axg_spdifout_iec958_put,
+	},
 	SOC_DOUBLE("Playback Volume", SPDIFOUT_GAIN0,  0,  8, 255, 0),
 	SOC_DOUBLE("Playback Switch", SPDIFOUT_CTRL0, 22, 21, 1, 1),
 	SOC_SINGLE("Playback Gain Enable Switch",
@@ -429,6 +513,10 @@ static int axg_spdifout_probe(struct platform_device *pdev)
 		return -ENOMEM;
 	platform_set_drvdata(pdev, priv);
 	priv->data = device_get_match_data(dev);
+	mutex_init(&priv->lock);
+	ret = snd_pcm_create_iec958_consumer_default(priv->cs, sizeof(priv->cs));
+	if (ret < 0)
+		return ret;
 
 	ret = device_reset(dev);
 	if (ret)

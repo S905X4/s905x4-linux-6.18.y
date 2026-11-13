@@ -632,12 +632,21 @@ static unsigned int hdmi_compute_n(unsigned int freq, unsigned long pixel_clk)
 void dw_hdmi_set_channel_status(struct dw_hdmi *hdmi,
 				u8 *channel_status)
 {
-	/*
-	 * Set channel status register for frequency and word length.
-	 * Use default values for other registers.
-	 */
+	/* The frame composer packs consumer status fields, not AES bytes. */
+	mutex_lock(&hdmi->audio_mutex);
+	hdmi_writeb(hdmi, ((channel_status[0] >> 2) & 0x01) |
+		    ((channel_status[5] & 0x03) << 4), HDMI_FC_AUDSCHNLS0);
+	hdmi_writeb(hdmi, channel_status[1], HDMI_FC_AUDSCHNLS1);
+	hdmi_writeb(hdmi, ((channel_status[0] & 0x38) << 1) |
+		    (channel_status[2] & 0x0f), HDMI_FC_AUDSCHNLS2);
+	/* Number the left/right subframes of the four I2S lanes. */
+	hdmi_writeb(hdmi, 0x42, HDMI_FC_AUDSCHNLS3);
+	hdmi_writeb(hdmi, 0x86, HDMI_FC_AUDSCHNLS4);
+	hdmi_writeb(hdmi, 0x31, HDMI_FC_AUDSCHNLS5);
+	hdmi_writeb(hdmi, 0x75, HDMI_FC_AUDSCHNLS6);
 	hdmi_writeb(hdmi, channel_status[3], HDMI_FC_AUDSCHNLS7);
 	hdmi_writeb(hdmi, channel_status[4], HDMI_FC_AUDSCHNLS8);
+	mutex_unlock(&hdmi->audio_mutex);
 }
 EXPORT_SYMBOL_GPL(dw_hdmi_set_channel_status);
 
@@ -3538,6 +3547,7 @@ struct dw_hdmi *dw_hdmi_probe(struct platform_device *pdev,
 		audio.get_eld	= hdmi_audio_get_eld;
 		audio.write	= hdmi_writeb;
 		audio.read	= hdmi_readb;
+		audio.spdif	= plat_data->spdif_input;
 		hdmi->enable_audio = dw_hdmi_i2s_audio_enable;
 		hdmi->disable_audio = dw_hdmi_i2s_audio_disable;
 

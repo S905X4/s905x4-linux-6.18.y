@@ -108,8 +108,11 @@
 
 		dai-link-2 {
 			sound-dai = <&spdifout_a>;
-			codec {
+			codec-0 {
 				sound-dai = <&spdif_dit>;
+			};
+			codec-1 {
+				sound-dai = <&tohdmitx TOHDMITX_SPDIF_IN_A>;
 			};
 		};
 
@@ -131,7 +134,14 @@
 		dai-link-4 {
 			sound-dai = <&tohdmitx TOHDMITX_I2S_OUT>;
 			codec {
-				sound-dai = <&hdmi_tx>;
+				sound-dai = <&hdmi_tx 0>;
+			};
+		};
+
+		dai-link-5 {
+			sound-dai = <&tohdmitx TOHDMITX_SPDIF_OUT>;
+			codec {
+				sound-dai = <&hdmi_tx 1>;
 			};
 		};
 	};
