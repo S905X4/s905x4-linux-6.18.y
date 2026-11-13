@@ -358,6 +358,16 @@ static int meson_g12a_afbcd_setup_surface(struct meson_drm *priv,
 	/* BSP S0/S1/S2 register blocks begin at 0x3a10/0x3a30/0x3a50. */
 	u32 offset = index * 0x20;
 	u32 format = meson_g12a_afbcd_pixel_fmt(osd->modifier, osd->format);
+	u32 x_start = 0, x_end = osd->width - 1;
+	u32 y_start = 0, y_end = osd->height - 1;
+
+	if (priv->sc2) {
+		/* The AFBC-to-VIU transfer must cover the same source window. */
+		x_start = FIELD_GET(GENMASK(12, 0), osd->blk0_cfg[1]);
+		x_end = FIELD_GET(GENMASK(28, 16), osd->blk0_cfg[1]);
+		y_start = FIELD_GET(GENMASK(12, 0), osd->blk0_cfg[2]);
+		y_end = FIELD_GET(GENMASK(28, 16), osd->blk0_cfg[2]);
+	}
 
 	if (osd->modifier & AFBC_FORMAT_MOD_YTR)
 		format |= VPU_MAFBC_YUV_TRANSFORM;
@@ -377,11 +387,13 @@ static int meson_g12a_afbcd_setup_surface(struct meson_drm *priv,
 	meson_rdma_writel_sync(priv, osd->width, VPU_MAFBC_BUFFER_WIDTH_S0 + offset);
 	meson_rdma_writel_sync(priv, ALIGN(osd->height, 32),
 			       VPU_MAFBC_BUFFER_HEIGHT_S0 + offset);
-	meson_rdma_writel_sync(priv, 0, VPU_MAFBC_BOUNDING_BOX_X_START_S0 + offset);
-	meson_rdma_writel_sync(priv, osd->width - 1,
+	meson_rdma_writel_sync(priv, x_start,
+			       VPU_MAFBC_BOUNDING_BOX_X_START_S0 + offset);
+	meson_rdma_writel_sync(priv, x_end,
 			       VPU_MAFBC_BOUNDING_BOX_X_END_S0 + offset);
-	meson_rdma_writel_sync(priv, 0, VPU_MAFBC_BOUNDING_BOX_Y_START_S0 + offset);
-	meson_rdma_writel_sync(priv, osd->height - 1,
+	meson_rdma_writel_sync(priv, y_start,
+			       VPU_MAFBC_BOUNDING_BOX_Y_START_S0 + offset);
+	meson_rdma_writel_sync(priv, y_end,
 			       VPU_MAFBC_BOUNDING_BOX_Y_END_S0 + offset);
 	meson_rdma_writel_sync(priv, osd->blk1_cfg4,
 			       VPU_MAFBC_OUTPUT_BUF_ADDR_LOW_S0 + offset);
