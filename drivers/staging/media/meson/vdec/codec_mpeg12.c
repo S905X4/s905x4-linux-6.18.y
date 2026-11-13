@@ -494,7 +494,8 @@ static int mpeg12_multi_present(struct amvdec_session *sess, int index)
 	m->pending--;
 	if (pic->packet_done)
 		atomic_dec(&sess->esparser_queued_bufs);
-	v4l2_m2m_buf_done(vb, VB2_BUF_STATE_DONE);
+	v4l2_m2m_buf_done(vb, pic->flags & V4L2_BUF_FLAG_ERROR ?
+			  VB2_BUF_STATE_ERROR : VB2_BUF_STATE_DONE);
 	schedule_work(&sess->esparser_queue_work);
 	return 0;
 }
@@ -668,7 +669,7 @@ static int mpeg12_multi_picture_done(struct amvdec_session *sess, u32 status)
 	 * as in vmpeg12_multi; a cumulative count cannot invalidate a clean IP.
 	 */
 	if (index < 0 || index >= MPEG12_MULTI_BUFFERS ||
-	    rec != m->canvas[index] || info & MPEG12_MULTI_PIC_ERROR ||
+	    rec != m->canvas[index] ||
 	    type == MPEG12_MULTI_PIC_TYPE)
 		return -EIO;
 	if ((seq & MPEG12_MULTI_SEQ_EXT) && (seq & MPEG12_MULTI_SEQ_PROG) &&
@@ -681,6 +682,18 @@ static int mpeg12_multi_picture_done(struct amvdec_session *sess, u32 status)
 	ret = mpeg12_multi_timestamp(sess, pic, offset);
 	if (ret)
 		return ret;
+	/* A real PIC_DONE with parser damage is recoverable, not a queue
+	 * failure. Keep its exact token and reference lifetime; report damage
+	 * on CAPTURE, including pictures predicted from a damaged reference.
+	 * A clean I picture starts a new reference chain without a reset.
+	 */
+	pic->flags &= ~V4L2_BUF_FLAG_ERROR;
+	if ((info & MPEG12_MULTI_PIC_ERROR) ||
+	    (type && m->refs[1] >= 0 &&
+	     (m->picture[m->refs[1]].flags & V4L2_BUF_FLAG_ERROR)) ||
+	    (type == MPEG12_MULTI_TYPE_B && m->refs[0] >= 0 &&
+	     (m->picture[m->refs[0]].flags & V4L2_BUF_FLAG_ERROR)))
+		pic->flags |= V4L2_BUF_FLAG_ERROR;
 	ret = mpeg12_multi_retire_preroll(sess, pic->packet_offset, type, drop);
 	if (ret)
 		return ret;
