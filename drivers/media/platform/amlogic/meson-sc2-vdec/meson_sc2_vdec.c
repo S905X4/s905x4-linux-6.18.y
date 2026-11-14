@@ -443,10 +443,12 @@ static void sc2_buf_cleanup(struct vb2_buffer *vb)
 	if (V4L2_TYPE_IS_OUTPUT(vb->type))
 		return;
 	mutex_lock(&ctx->state_lock);
-	list_del(&buf->capture_entry);
+	list_del_init(&buf->capture_entry);
 	meson_sc2_surface_free(ctx->dev->hw, &buf->surface);
-	if (buf->output_buffer)
+	if (buf->output_buffer) {
 		dma_buf_put(buf->output_buffer);
+		buf->output_buffer = NULL;
+	}
 	mutex_unlock(&ctx->state_lock);
 }
 
