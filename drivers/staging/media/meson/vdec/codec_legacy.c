@@ -22,6 +22,7 @@
 
 #include "codec_legacy.h"
 #include "dos_regs.h"
+#include "esparser.h"
 #include "vdec_helpers.h"
 #include "vdec_1.h"
 
@@ -49,6 +50,8 @@
 #define AVSM_CANVAS_DATAH AVSM_REG(0x9eb)
 #define AVSM_CANVAS_ADDR AVSM_REG(0x9ec)
 #define AVSM_CANVAS_CFG0 AVSM_REG(0x9ed)
+
+static const u8 mjpeg_eos[SZ_1K] = { 0xff, 0xd9 };
 
 /* avs_multi.c vavs_save_regs/vavs_restore_regs, vendor word addresses.
  * Scratch4/B are per-run commands, not saved context. I is private LMEM DMA.
@@ -101,6 +104,7 @@ struct codec_legacy {
 	u32 mjpeg_width;
 	u32 mjpeg_height;
 	bool mjpeg_fields;
+	bool mjpeg_boundary_queued;
 	u8 wmv_sequence[4];
 	bool wmv_sequence_valid;
 	bool failed;
@@ -790,6 +794,8 @@ static int mjpeg_prepare_input(struct amvdec_session *sess,
 	}
 	if (!width || !height || width > LEGACY_WIDTH || height > LEGACY_HEIGHT)
 		return -EINVAL;
+	/* Completion retires the token before publishing its CAPTURE buffer. */
+	guard(mutex)(&ctx->output_lock);
 	/* The single-instance firmware consumes a stream, not one submitted
 	 * picture at a time. Keep its lookahead supplied while the canvas layout
 	 * is unchanged; only a real layout change needs outstanding DMA drained.
@@ -797,8 +803,22 @@ static int mjpeg_prepare_input(struct amvdec_session *sess,
 	if (width == ctx->mjpeg_width && height == ctx->mjpeg_height &&
 	    fields == ctx->mjpeg_fields)
 		return 0;
-	if (atomic_read(&sess->esparser_queued_bufs))
+	if (atomic_read(&sess->esparser_queued_bufs)) {
+		int ret;
+
+		/* The last old JPEG may need stream lookahead before BUFFEROUT.
+		 * Use the same bounded EOI padding as terminal drain, but retain
+		 * every picture token and do not mark the session stopped/EOS.
+		 * Its real completion must precede any canvas/height changes.
+		 */
+		if (!ctx->mjpeg_boundary_queued) {
+			ret = esparser_queue_eos(sess->core, mjpeg_eos, sizeof(mjpeg_eos));
+			if (ret < 0)
+				return ret;
+			ctx->mjpeg_boundary_queued = true;
+		}
 		return -EAGAIN;
+	}
 	if ((width != sess->width || height != sess->height) &&
 	    !legacy_old_frames_drained(sess))
 		return -EAGAIN;
@@ -836,6 +856,7 @@ static int mjpeg_prepare_input(struct amvdec_session *sess,
 	ctx->mjpeg_width = width;
 	ctx->mjpeg_height = height;
 	ctx->mjpeg_fields = fields;
+	ctx->mjpeg_boundary_queued = false;
 	return 0;
 }
 
@@ -1695,7 +1716,6 @@ static irqreturn_t legacy_threaded_isr(struct amvdec_session *sess)
 }
 
 static const u8 vc1_eos[SZ_1K] = { 0, 0, 1, 0x0a };
-static const u8 mjpeg_eos[SZ_1K] = { 0xff, 0xd9 };
 static const u8 *vc1_end(u32 *len) { *len = sizeof(vc1_eos); return vc1_eos; }
 static const u8 *mjpeg_end(u32 *len) { *len = sizeof(mjpeg_eos); return mjpeg_eos; }
 
