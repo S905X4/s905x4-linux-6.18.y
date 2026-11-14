@@ -448,7 +448,8 @@ static void meson_overlay_setup_scaler_params(struct meson_drm *priv,
 
 	vd->if0_chroma_y0 = VD_Y_START(vd_start_lines >> 1) |
 				      VD_Y_END(vd_end_lines >> 1);
-	if (priv->sc2 && state->fb->format->format == DRM_FORMAT_UYVY)
+	if (vd->uyvy || state->fb->format->format == DRM_FORMAT_NV16 ||
+	    state->fb->format->format == DRM_FORMAT_NV61)
 		vd->if0_chroma_y0 = vd->if0_luma_y0;
 
 	vd->vpp_pic_in_height = vd_end_lines - vd_start_lines + 1;
@@ -506,6 +507,7 @@ static void meson_overlay_atomic_update(struct drm_plane *plane,
 
 	spin_lock_irqsave(&priv->drm->event_lock, flags);
 	vd->interlace = interlace_mode;
+	vd->uyvy = priv->sc2 && fb->format->format == DRM_FORMAT_UYVY;
 
 	if ((fb->modifier & DRM_FORMAT_MOD_AMLOGIC_FBC(0, 0)) ==
 			    DRM_FORMAT_MOD_AMLOGIC_FBC(0, 0)) {
@@ -585,7 +587,6 @@ static void meson_overlay_atomic_update(struct drm_plane *plane,
 	/* Default values for RGB888/YUV444 */
 	vd->if0_gen_reg2 = 0;
 	vd->fmt_ctrl = 0;
-	vd->uyvy = priv->sc2 && fb->format->format == DRM_FORMAT_UYVY;
 
 	/* None will match for AFBC Only formats */
 	switch (fb->format->format) {
@@ -596,12 +597,6 @@ static void meson_overlay_atomic_update(struct drm_plane *plane,
 			CANVAS_ADDR2(priv->canvas_id_vd[meson_overlay->index][0]) |
 			CANVAS_ADDR1(priv->canvas_id_vd[meson_overlay->index][0]) |
 			CANVAS_ADDR0(priv->canvas_id_vd[meson_overlay->index][0]);
-		/* SC2 video_hw.c: 4:2:2 has no vertical formatter. */
-		vd->fmt_ctrl = VD_HORZ_Y_C_RATIO(1) | VD_HORZ_FMT_EN |
-			VD_VERT_RPT_LINE0 | VD_VERT_INITIAL_PHASE(12) |
-			VD_VERT_PHASE_STEP(16);
-		if (FIELD_GET(GENMASK(14, 0), vd->if0_luma_x0) & 1)
-			vd->fmt_ctrl |= VD_HORZ_INITIAL_PHASE(8);
 		break;
 	case DRM_FORMAT_YUYV:
 		vd->if0_gen_reg |= VD_BYTES_PER_PIXEL(1);
@@ -618,12 +613,15 @@ static void meson_overlay_atomic_update(struct drm_plane *plane,
 		break;
 	case DRM_FORMAT_NV12:
 	case DRM_FORMAT_NV21:
+	case DRM_FORMAT_NV16:
+	case DRM_FORMAT_NV61:
 		vd->if0_gen_reg |= VD_SEPARATE_EN;
 		vd->if0_canvas0 =
 					CANVAS_ADDR2(priv->canvas_id_vd[meson_overlay->index][1]) |
 					CANVAS_ADDR1(priv->canvas_id_vd[meson_overlay->index][1]) |
 					CANVAS_ADDR0(priv->canvas_id_vd[meson_overlay->index][0]);
-		if (fb->format->format == DRM_FORMAT_NV12)
+		if (fb->format->format == DRM_FORMAT_NV12 ||
+		    fb->format->format == DRM_FORMAT_NV16)
 			vd->if0_gen_reg2 = VD_COLOR_MAP(1);
 		else
 			vd->if0_gen_reg2 = VD_COLOR_MAP(2);
@@ -683,6 +681,16 @@ static void meson_overlay_atomic_update(struct drm_plane *plane,
 			break;
 		}
 		break;
+	}
+
+	if (vd->uyvy || fb->format->format == DRM_FORMAT_NV16 ||
+	    fb->format->format == DRM_FORMAT_NV61) {
+		/* SC2 video_hw.c: 4:2:2 has no vertical formatter. */
+		vd->fmt_ctrl = VD_HORZ_Y_C_RATIO(1) | VD_HORZ_FMT_EN |
+			VD_VERT_RPT_LINE0 | VD_VERT_INITIAL_PHASE(12) |
+			VD_VERT_PHASE_STEP(16);
+		if (FIELD_GET(GENMASK(14, 0), vd->if0_luma_x0) & 1)
+			vd->fmt_ctrl |= VD_HORZ_INITIAL_PHASE(8);
 	}
 
 	/* Update Canvas with buffer address */
@@ -786,7 +794,8 @@ static const struct drm_plane_helper_funcs meson_overlay_helper_funcs = {
 static bool meson_overlay_format_mod_supported(struct drm_plane *plane,
 					       u32 format, u64 modifier)
 {
-	if (format == DRM_FORMAT_UYVY)
+	if (format == DRM_FORMAT_UYVY || format == DRM_FORMAT_NV16 ||
+	    format == DRM_FORMAT_NV61)
 		return to_meson_overlay(plane)->priv->sc2 &&
 		       modifier == DRM_FORMAT_MOD_LINEAR;
 
@@ -855,7 +864,10 @@ static const uint32_t supported_drm_formats[] = {
 	DRM_FORMAT_YUV410,
 	DRM_FORMAT_YUV420_8BIT, /* Amlogic FBC Only */
 	DRM_FORMAT_YUV420_10BIT, /* Amlogic FBC Only */
-	DRM_FORMAT_UYVY, /* SC2 only; excluded below on older SoCs. */
+	/* SC2-only formats; excluded below on older SoCs. */
+	DRM_FORMAT_UYVY,
+	DRM_FORMAT_NV16,
+	DRM_FORMAT_NV61,
 };
 
 static const uint64_t format_modifiers[] = {
@@ -874,6 +886,8 @@ static const uint32_t sc2_vd2_formats[] = {
 	DRM_FORMAT_UYVY,
 	DRM_FORMAT_NV12,
 	DRM_FORMAT_NV21,
+	DRM_FORMAT_NV16,
+	DRM_FORMAT_NV61,
 	DRM_FORMAT_YUV420_8BIT,
 	DRM_FORMAT_YUV420_10BIT,
 };
@@ -897,7 +911,8 @@ static int meson_overlay_create_one(struct meson_drm *priv, unsigned int index)
 				       &meson_overlay_funcs,
 				       index ? sc2_vd2_formats : supported_drm_formats,
 				       index ? ARRAY_SIZE(sc2_vd2_formats) :
-					       ARRAY_SIZE(supported_drm_formats) - !priv->sc2,
+					       ARRAY_SIZE(supported_drm_formats) -
+					       (priv->sc2 ? 0 : 3),
 				       format_modifiers,
 				       DRM_PLANE_TYPE_OVERLAY,
 				       "meson_video_vd%u", index + 1);
