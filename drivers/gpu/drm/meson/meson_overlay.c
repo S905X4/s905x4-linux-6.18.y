@@ -173,6 +173,7 @@ static int meson_overlay_atomic_check(struct drm_plane *plane,
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
 										 plane);
 	struct drm_crtc_state *crtc_state;
+	struct meson_drm *priv = to_meson_overlay(plane)->priv;
 
 	if (!new_plane_state->crtc)
 		return 0;
@@ -182,9 +183,13 @@ static int meson_overlay_atomic_check(struct drm_plane *plane,
 	if (IS_ERR(crtc_state))
 		return PTR_ERR(crtc_state);
 
+	/* SC2's Q18 source/destination ratio is published as a Q24 PPS step.
+	 * Cover a 64-pixel source across the full 4K output without relaxing
+	 * the independent downscale/vertical-repeat bound.
+	 */
 	return drm_atomic_helper_check_plane_state(new_plane_state,
 						   crtc_state,
-						   FRAC_16_16(1, 5),
+						   FRAC_16_16(1, priv->sc2 ? 64 : 5),
 						   FRAC_16_16(5, 1),
 						   true, true);
 }
@@ -488,6 +493,9 @@ static void meson_overlay_setup_scaler_params(struct meson_drm *priv,
 	vd->vpp_vsc_start_phase_step = ratio_y << 6;
 }
 
+static void meson_overlay_atomic_disable(struct drm_plane *plane,
+				       struct drm_atomic_state *state);
+
 static void meson_overlay_atomic_update(struct drm_plane *plane,
 					struct drm_atomic_state *state)
 {
@@ -502,6 +510,12 @@ static void meson_overlay_atomic_update(struct drm_plane *plane,
 	bool interlace_mode;
 
 	DRM_DEBUG_DRIVER("\n");
+
+	/* A clipped or zero-sized destination must not run the scaler/MIF. */
+	if (!new_state->visible) {
+		meson_overlay_atomic_disable(plane, state);
+		return;
+	}
 
 	interlace_mode = new_state->crtc->mode.flags & DRM_MODE_FLAG_INTERLACE;
 
