@@ -558,6 +558,21 @@ static void vdec_stop_streaming(struct vb2_queue *q)
 static int vdec_vb2_buf_prepare(struct vb2_buffer *vb)
 {
 	struct vb2_v4l2_buffer *vbuf = to_vb2_v4l2_buffer(vb);
+	struct amvdec_session *sess = vb2_get_drv_priv(vb->vb2_queue);
+
+	if (vb->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE &&
+	    sess->core->platform->revision == VDEC_REVISION_SC2 &&
+	    sess->fmt_out->pixfmt == V4L2_PIX_FMT_MJPEG) {
+		switch (vbuf->field) {
+		case V4L2_FIELD_ANY:
+		case V4L2_FIELD_NONE:
+		case V4L2_FIELD_SEQ_TB:
+		case V4L2_FIELD_SEQ_BT:
+			return 0;
+		default:
+			return -EINVAL;
+		}
+	}
 
 	vbuf->field = V4L2_FIELD_NONE;
 	return 0;

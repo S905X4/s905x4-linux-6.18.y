@@ -105,6 +105,7 @@ struct codec_legacy {
 	u32 mjpeg_height;
 	bool mjpeg_fields;
 	bool mjpeg_boundary_queued;
+	enum v4l2_field mjpeg_field;
 	u8 wmv_sequence[4];
 	bool wmv_sequence_valid;
 	bool failed;
@@ -750,7 +751,8 @@ static int mjpeg_prepare_input(struct amvdec_session *sess,
 	struct codec_legacy *ctx = sess->priv;
 	const u8 *data = vb2_plane_vaddr(&vbuf->vb2_buf, 0);
 	u32 size = *payload_size, pos = 2, width = 0, height = 0, i;
-	bool fields = false;
+	enum v4l2_field field = V4L2_FIELD_ANY;
+	bool fields = false, avi1 = false;
 
 	if (!ctx->configured)
 		return -EAGAIN;
@@ -773,6 +775,9 @@ static int mjpeg_prepare_input(struct amvdec_session *sess,
 		length = get_unaligned_be16(data + pos);
 		if (length < 2 || length > size - pos)
 			return -EINVAL;
+		if (marker == 0xe0 && length >= 7 &&
+		    !memcmp(data + pos + 2, "AVI1", 4))
+			avi1 = true;
 		if (marker >= 0xc0 && marker <= 0xcf && marker != 0xc4 &&
 		    marker != 0xc8 && marker != 0xcc) {
 			/* Baseline sequential JPEG only; do not advertise progressive. */
@@ -794,6 +799,12 @@ static int mjpeg_prepare_input(struct amvdec_session *sess,
 	}
 	if (!width || !height || width > LEGACY_WIDTH || height > LEGACY_HEIGHT)
 		return -EINVAL;
+	/* AVI1 is self-describing. Unmarked field pairs use OUTPUT's explicit
+	 * sequential order instead of inventing it from a clear firmware bit.
+	 */
+	if (fields && !avi1 && (vbuf->field == V4L2_FIELD_SEQ_TB ||
+			       vbuf->field == V4L2_FIELD_SEQ_BT))
+		field = vbuf->field;
 	/* Completion retires the token before publishing its CAPTURE buffer. */
 	guard(mutex)(&ctx->output_lock);
 	/* The single-instance firmware consumes a stream, not one submitted
@@ -801,7 +812,7 @@ static int mjpeg_prepare_input(struct amvdec_session *sess,
 	 * is unchanged; only a real layout change needs outstanding DMA drained.
 	 */
 	if (width == ctx->mjpeg_width && height == ctx->mjpeg_height &&
-	    fields == ctx->mjpeg_fields)
+	    fields == ctx->mjpeg_fields && field == ctx->mjpeg_field)
 		return 0;
 	if (atomic_read(&sess->esparser_queued_bufs)) {
 		int ret;
@@ -842,12 +853,14 @@ static int mjpeg_prepare_input(struct amvdec_session *sess,
 			u8 second = primary + 12;
 			dma_addr_t dma = vb2_dma_contig_plane_dma_addr(vb, p);
 
-			ret = legacy_canvas_config(sess, primary, dma, stride,
-						 canvas_height >> fields);
+			ret = legacy_canvas_config(sess, primary,
+				dma + (field == V4L2_FIELD_SEQ_BT ? pitch : 0),
+				stride, canvas_height >> fields);
 			if (ret)
 				return ret;
-			ret = legacy_canvas_config(sess, second, dma + pitch,
-						 stride, canvas_height / 2);
+			ret = legacy_canvas_config(sess, second,
+				dma + (field == V4L2_FIELD_SEQ_BT ? 0 : pitch),
+				stride, canvas_height / 2);
 			if (ret)
 				return ret;
 		}
@@ -856,6 +869,7 @@ static int mjpeg_prepare_input(struct amvdec_session *sess,
 	ctx->mjpeg_width = width;
 	ctx->mjpeg_height = height;
 	ctx->mjpeg_fields = fields;
+	ctx->mjpeg_field = field;
 	ctx->mjpeg_boundary_queued = false;
 	return 0;
 }
@@ -1651,6 +1665,12 @@ static irqreturn_t legacy_process_output(struct amvdec_session *sess)
 		if (reg & BIT(7))
 			top_first = !top_first;
 		field = top_first ? V4L2_FIELD_INTERLACED_TB : V4L2_FIELD_INTERLACED_BT;
+		if (!(reg & BIT(7))) {
+			if (ctx->mjpeg_field == V4L2_FIELD_SEQ_TB)
+				field = V4L2_FIELD_INTERLACED_TB;
+			else if (ctx->mjpeg_field == V4L2_FIELD_SEQ_BT)
+				field = V4L2_FIELD_INTERLACED_BT;
+		}
 	}
 	metadata_changed = !ctx->metadata_ready || width != sess->width ||
 		height != sess->height || field != sess->field ||
