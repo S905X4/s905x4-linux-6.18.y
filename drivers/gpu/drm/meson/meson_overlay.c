@@ -685,12 +685,16 @@ static void meson_overlay_atomic_update(struct drm_plane *plane,
 
 	if (vd->uyvy || fb->format->format == DRM_FORMAT_NV16 ||
 	    fb->format->format == DRM_FORMAT_NV61) {
-		/* SC2 video_hw.c: 4:2:2 has no vertical formatter. */
+		/* Packed422 bypasses vertical formatting; separate planes need
+		 * the enabled 1:1 formatter handshake, as planar YUV422 does.
+		 */
 		vd->fmt_ctrl = VD_HORZ_Y_C_RATIO(1) | VD_HORZ_FMT_EN |
 			VD_VERT_RPT_LINE0 | VD_VERT_INITIAL_PHASE(12) |
 			VD_VERT_PHASE_STEP(16);
 		if (FIELD_GET(GENMASK(14, 0), vd->if0_luma_x0) & 1)
 			vd->fmt_ctrl |= VD_HORZ_INITIAL_PHASE(8);
+		if (!vd->uyvy)
+			vd->fmt_ctrl |= VD_VERT_FMT_EN;
 	}
 
 	/* Update Canvas with buffer address */
