@@ -464,6 +464,7 @@ void esparser_queue_all_src(struct work_struct *work)
 	 * surface is owned by VB2 again and its allocated backing is unchanged.
 	 */
 	if ((!sess->should_stop || sess->draining) && !sess->aborted &&
+	    !READ_ONCE(sess->source_change_pending) &&
 	    sess->core->platform->revision == VDEC_REVISION_SC2 &&
 	    sess->streamon_cap && sess->status == STATUS_NEEDS_RESUME &&
 	    sess->capture_width == amvdec_get_output_width(sess) &&

@@ -1049,7 +1049,10 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 	if (ret)
 		return ret;
 
-	if (!(sess->streamon_out & sess->streamon_cap))
+	if (!sess->streamon_out ||
+	    (!sess->streamon_cap &&
+	     (sess->core->platform->revision != VDEC_REVISION_SC2 ||
+	      cmd->cmd != V4L2_DEC_CMD_STOP)))
 		return 0;
 
 	if (cmd->cmd == V4L2_DEC_CMD_START) {
@@ -1062,6 +1065,7 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 			codec_ops->resume(sess);
 			if (sess->aborted)
 				return -EIO;
+			sess->status = STATUS_RUNNING;
 			if (sess->draining)
 				sess->drain_deadline = jiffies + msecs_to_jiffies(5000);
 			schedule_work(&sess->esparser_queue_work);
