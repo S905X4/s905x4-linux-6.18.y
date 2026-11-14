@@ -63,6 +63,7 @@ struct meson_video_state {
 	uint32_t fmt_w;
 	uint32_t if0_canvas0;
 	uint32_t if0_gen_reg2;
+	bool uyvy;
 	uint32_t fmt_ctrl;
 	uint32_t addr0;
 	uint32_t addr1;

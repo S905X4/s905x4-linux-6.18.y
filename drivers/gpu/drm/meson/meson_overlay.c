@@ -52,6 +52,7 @@
 /* VIU_VD1_FMT_CTRL */
 #define VD_HORZ_Y_C_RATIO(value)	FIELD_PREP(GENMASK(22, 21), value)
 #define VD_HORZ_FMT_EN			BIT(20)
+#define VD_HORZ_INITIAL_PHASE(value)	FIELD_PREP(GENMASK(27, 24), value)
 #define VD_VERT_RPT_LINE0		BIT(16)
 #define VD_VERT_INITIAL_PHASE(value)	FIELD_PREP(GENMASK(11, 8), value)
 #define VD_VERT_PHASE_STEP(value)	FIELD_PREP(GENMASK(7, 1), value)
@@ -447,6 +448,8 @@ static void meson_overlay_setup_scaler_params(struct meson_drm *priv,
 
 	vd->if0_chroma_y0 = VD_Y_START(vd_start_lines >> 1) |
 				      VD_Y_END(vd_end_lines >> 1);
+	if (priv->sc2 && state->fb->format->format == DRM_FORMAT_UYVY)
+		vd->if0_chroma_y0 = vd->if0_luma_y0;
 
 	vd->vpp_pic_in_height = vd_end_lines - vd_start_lines + 1;
 
@@ -582,10 +585,24 @@ static void meson_overlay_atomic_update(struct drm_plane *plane,
 	/* Default values for RGB888/YUV444 */
 	vd->if0_gen_reg2 = 0;
 	vd->fmt_ctrl = 0;
+	vd->uyvy = priv->sc2 && fb->format->format == DRM_FORMAT_UYVY;
 
 	/* None will match for AFBC Only formats */
 	switch (fb->format->format) {
 	/* TOFIX DRM_FORMAT_RGB888 should be supported */
+	case DRM_FORMAT_UYVY:
+		vd->if0_gen_reg |= VD_BYTES_PER_PIXEL(1) | VD_LITTLE_ENDIAN;
+		vd->if0_canvas0 =
+			CANVAS_ADDR2(priv->canvas_id_vd[meson_overlay->index][0]) |
+			CANVAS_ADDR1(priv->canvas_id_vd[meson_overlay->index][0]) |
+			CANVAS_ADDR0(priv->canvas_id_vd[meson_overlay->index][0]);
+		/* SC2 video_hw.c: 4:2:2 has no vertical formatter. */
+		vd->fmt_ctrl = VD_HORZ_Y_C_RATIO(1) | VD_HORZ_FMT_EN |
+			VD_VERT_RPT_LINE0 | VD_VERT_INITIAL_PHASE(12) |
+			VD_VERT_PHASE_STEP(16);
+		if (FIELD_GET(GENMASK(14, 0), vd->if0_luma_x0) & 1)
+			vd->fmt_ctrl |= VD_HORZ_INITIAL_PHASE(8);
+		break;
 	case DRM_FORMAT_YUYV:
 		vd->if0_gen_reg |= VD_BYTES_PER_PIXEL(1);
 		vd->if0_canvas0 =
@@ -769,6 +786,10 @@ static const struct drm_plane_helper_funcs meson_overlay_helper_funcs = {
 static bool meson_overlay_format_mod_supported(struct drm_plane *plane,
 					       u32 format, u64 modifier)
 {
+	if (format == DRM_FORMAT_UYVY)
+		return to_meson_overlay(plane)->priv->sc2 &&
+		       modifier == DRM_FORMAT_MOD_LINEAR;
+
 	if (modifier == DRM_FORMAT_MOD_LINEAR &&
 	    format != DRM_FORMAT_YUV420_8BIT &&
 	    format != DRM_FORMAT_YUV420_10BIT)
@@ -834,6 +855,7 @@ static const uint32_t supported_drm_formats[] = {
 	DRM_FORMAT_YUV410,
 	DRM_FORMAT_YUV420_8BIT, /* Amlogic FBC Only */
 	DRM_FORMAT_YUV420_10BIT, /* Amlogic FBC Only */
+	DRM_FORMAT_UYVY, /* SC2 only; excluded below on older SoCs. */
 };
 
 static const uint64_t format_modifiers[] = {
@@ -847,8 +869,9 @@ static const uint64_t format_modifiers[] = {
 	DRM_FORMAT_MOD_INVALID,
 };
 
-/* VD2 shares the sourced SC2 4:2:0 MIF and DOS-FBC paths. */
+/* VD2 shares the sourced SC2 linear 4:2:2, 4:2:0 and DOS-FBC paths. */
 static const uint32_t sc2_vd2_formats[] = {
+	DRM_FORMAT_UYVY,
 	DRM_FORMAT_NV12,
 	DRM_FORMAT_NV21,
 	DRM_FORMAT_YUV420_8BIT,
@@ -874,7 +897,7 @@ static int meson_overlay_create_one(struct meson_drm *priv, unsigned int index)
 				       &meson_overlay_funcs,
 				       index ? sc2_vd2_formats : supported_drm_formats,
 				       index ? ARRAY_SIZE(sc2_vd2_formats) :
-					       ARRAY_SIZE(supported_drm_formats),
+					       ARRAY_SIZE(supported_drm_formats) - !priv->sc2,
 				       format_modifiers,
 				       DRM_PLANE_TYPE_OVERLAY,
 				       "meson_video_vd%u", index + 1);

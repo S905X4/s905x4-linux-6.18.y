@@ -43,6 +43,8 @@ struct meson_crtc {
 	bool osd1_afbcd;
 	struct {
 		bool interlace;
+		bool uyvy_gen_reg3_active;
+		u32 saved_gen_reg3;
 		u32 vsc_ini_phase[2];
 		u32 vsc_phase_ctrl[2];
 	} video[2];
@@ -344,6 +346,20 @@ static void meson_crtc_disable_osd1(struct meson_crtc *meson_crtc)
 	}
 }
 
+static void meson_crtc_sc2_restore_video_order(struct meson_crtc *meson_crtc,
+					      unsigned int index)
+{
+	struct meson_drm *priv = meson_crtc->priv;
+	unsigned int reg = index ? SC2_VD2_IF0_GEN_REG3 : SC2_VD1_IF0_GEN_REG3;
+	u32 mask = GENMASK(9, 8) | GENMASK(2, 0);
+
+	if (!meson_crtc->video[index].uyvy_gen_reg3_active)
+		return;
+	writel_bits_relaxed(mask, meson_crtc->video[index].saved_gen_reg3 & mask,
+			    priv->io_base + _REG(reg));
+	meson_crtc->video[index].uyvy_gen_reg3_active = false;
+}
+
 static void meson_crtc_disable_video(struct meson_crtc *meson_crtc,
 				     unsigned int index)
 {
@@ -358,6 +374,7 @@ static void meson_crtc_disable_video(struct meson_crtc *meson_crtc,
 		writel_relaxed(0, priv->io_base +
 			       _REG(meson_viu_mif_reg(priv, index ?
 						  VD2_IF0_GEN_REG : VD1_IF0_GEN_REG)));
+		meson_crtc_sc2_restore_video_order(meson_crtc, index);
 		meson_viu_video_afbc_select(priv, index, false);
 	} else if (meson_vpu_is_compatible(priv, VPU_COMPATIBLE_G12A)) {
 		writel_relaxed(0, priv->io_base + _REG(VD1_BLEND_SRC_CTRL));
@@ -535,6 +552,27 @@ static void meson_crtc_write_video_mif(struct meson_drm *priv,
 	/* Legacy VD1/VD2 field addresses precede the SoC-specific translation. */
 	unsigned int offset = index * (VD2_IF0_GEN_REG - VD1_IF0_GEN_REG);
 
+	if (priv->sc2) {
+		struct meson_crtc *meson_crtc = to_meson_crtc(priv->crtc);
+		unsigned int reg = index ? SC2_VD2_IF0_GEN_REG3 :
+					  SC2_VD1_IF0_GEN_REG3;
+		const u32 mask = GENMASK(9, 8) | GENMASK(2, 0);
+		u32 value;
+
+		/* Preserve the configured non-linear byte order across format flips. */
+		if (vd->uyvy) {
+			if (!meson_crtc->video[index].uyvy_gen_reg3_active) {
+				meson_crtc->video[index].saved_gen_reg3 =
+					readl_relaxed(priv->io_base + _REG(reg));
+				meson_crtc->video[index].uyvy_gen_reg3_active = true;
+			}
+			value = vd->stride0 % 32 ? 0 : vd->stride0 % 64 ? 2 : 4;
+			writel_bits_relaxed(mask, value, priv->io_base + _REG(reg));
+		} else {
+			meson_crtc_sc2_restore_video_order(meson_crtc, index);
+		}
+	}
+
 	writel_relaxed(vd->if0_gen_reg, priv->io_base +
 		       _REG(meson_viu_mif_reg(priv, VD1_IF0_GEN_REG + offset)));
 	if (!index || priv->sc2)
@@ -680,7 +718,7 @@ static void meson_crtc_update_video(struct meson_crtc *meson_crtc,
 					    vd->height0,
 					    MESON_CANVAS_WRAP_NONE,
 					    MESON_CANVAS_BLKMODE_LINEAR,
-					    MESON_CANVAS_ENDIAN_SWAP64);
+					    vd->uyvy ? 0 : MESON_CANVAS_ENDIAN_SWAP64);
 		}
 
 		writel_relaxed(0, priv->io_base + _REG(meson_viu_afbc_reg(priv, index, AFBC_ENABLE)));
