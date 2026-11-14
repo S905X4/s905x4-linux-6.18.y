@@ -221,9 +221,13 @@ static int di_program(struct sc2_di_ctx *ctx,
 		 BIT(21) | BIT(20) | BIT(17) |
 		 (packed_in ? (16 << 1) : (8 << 1) | BIT(0)));
 	di_write(di, IF0_BASE + IF_FMT_W, (r->width << 16) | (r->width / 2));
+	/* The 420 formatter repeats the last chroma row at the field edge.
+	 * Pushing dummy pixels makes that interpolation consume neutral chroma
+	 * instead. Keep the packed422 policy, which has no vertical formatter.
+	 */
 	di_write(di, IF0_BASE + IF_GEN,
-		 BIT(29) | BIT(25) | (8 << 19) | BIT(18) | BIT(4) | BIT(0) |
-		 (packed_in ? BIT(14) : BIT(6) | BIT(1)));
+		 BIT(29) | BIT(25) | (8 << 19) | BIT(4) | BIT(0) |
+		 (packed_in ? BIT(18) | BIT(14) : BIT(6) | BIT(1)));
 	di_write(di, DIWR_X, r->width - 1);
 	di_write(di, DIWR_Y, r->height - 1);
 	di_write(di, DIWR_CANVAS, di->canvas_id[2] |
