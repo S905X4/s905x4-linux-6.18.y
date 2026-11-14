@@ -4181,6 +4181,7 @@ struct h264_multi {
     bool empty;
     bool incomplete;
     bool eos_sent;
+    bool source_last;
 };
 
 static int h264_multi_stop(struct amvdec_session *sess);
@@ -4822,6 +4823,30 @@ static int h264_multi_configure_slice(struct amvdec_session *sess)
     return 0;
 }
 
+/* CONFIG has stopped picture reconstruction and every old DPB picture has
+ * been returned before this empty marker. Only a queued, driver-owned buffer
+ * can terminate CAPTURE; a held export is never borrowed for the marker.
+ */
+static void h264_multi_source_boundary(struct amvdec_session *sess)
+{
+    struct h264_multi *m = ((struct codec_h264 *)sess->priv)->multi;
+    struct vb2_v4l2_buffer *vb;
+    unsigned int plane;
+
+    if (!sess->source_change_pending || m->source_last)
+        return;
+    vb = v4l2_m2m_dst_buf_remove(sess->m2m_ctx);
+    if (!vb)
+        return;
+    for (plane = 0; plane < vb->vb2_buf.num_planes; plane++)
+        vb2_set_plane_payload(&vb->vb2_buf, plane, 0);
+    vb->flags |= V4L2_BUF_FLAG_LAST;
+    vb->field = V4L2_FIELD_NONE;
+    vb->sequence = sess->sequence_cap++;
+    m->source_last = true;
+    v4l2_m2m_buf_done(vb, VB2_BUF_STATE_DONE);
+}
+
 static int h264_multi_parameters(struct amvdec_session *sess)
 {
     struct codec_h264 *h264 = sess->priv;
@@ -4885,6 +4910,11 @@ static int h264_multi_parameters(struct amvdec_session *sess)
         meson_h264_dpb_flush_dpb(dpb);
         if (m->error)
             return m->error;
+        for (i = 0; i < dpb->mDPB.used_size; i++)
+            if (!dpb->mDPB.fs[i]->is_output && !dpb->mDPB.fs[i]->pre_output)
+                return -EILSEQ;
+        m->source_last = false;
+        WRITE_ONCE(sess->source_change_pending, true);
     }
     if (!reuse) {
         meson_h264_dpb_dpb_init_global(dpb, 0, 0, refs + 1);
@@ -4935,6 +4965,11 @@ static int h264_multi_parameters(struct amvdec_session *sess)
         return 0;
     }
     m->waiting_capture = true;
+    if (sess->source_change_pending) {
+        amvdec_src_change(sess, width * 16, height * 16, capacity + 6);
+        h264_multi_source_boundary(sess);
+        return 0;
+    }
     return 1;
 }
 
@@ -4950,9 +4985,14 @@ static void h264_multi_resume(struct amvdec_session *sess)
     int ret;
 
     mutex_lock(&m->lock);
+    if (sess->source_change_pending && !m->source_last) {
+        ret = -EPROTO;
+        goto error;
+    }
     if (!m->waiting_capture || !bytes ||
         sess->num_dst_bufs < h264->max_dpb + 6 ||
-        sess->num_dst_bufs > ARRAY_SIZE(m->surface)) {
+        sess->num_dst_bufs > ARRAY_SIZE(m->surface) ||
+        v4l2_m2m_num_dst_bufs_ready(sess->m2m_ctx) != sess->num_dst_bufs) {
         ret = -EINVAL;
         goto error;
     }
@@ -4979,6 +5019,7 @@ static void h264_multi_resume(struct amvdec_session *sess)
     dpb->colocated_mv_addr_end = h264->ref_paddr + bytes;
     amvdec_set_output_format(sess);
     m->waiting_capture = false;
+    WRITE_ONCE(sess->source_change_pending, false);
     amvdec_write_dos(core, AV_SCRATCH_J, H264_ACTION_CONFIG_DONE);
     /* CONFIG_PARAM waits for allocation in scratch 0; scratch 7 is run restore. */
     amvdec_write_dos(core, AV_SCRATCH_0, (h264->max_refs << 24) |
@@ -5168,6 +5209,10 @@ static void h264_multi_recycle(struct amvdec_core *core, u32 index)
     int ret = 0;
 
     mutex_lock(&m->lock);
+    if (m->waiting_capture) {
+        h264_multi_source_boundary(sess);
+        goto error;
+    }
     if (index >= sess->num_dst_bufs || !m->surface[index].displayed) {
         ret = -EINVAL;
         goto error;
@@ -5191,6 +5236,20 @@ error:
     mutex_unlock(&m->lock);
     if (ret < 0)
         amvdec_abort(sess);
+}
+
+static void codec_h264_capture_queued(struct amvdec_session *sess,
+                                      struct vb2_v4l2_buffer *vb)
+{
+    struct codec_h264 *h264 = sess->priv;
+    unsigned int index;
+
+    if (!h264 || !h264->multi)
+        return;
+    for (index = 0; index < sess->num_dst_bufs; index++)
+        if (sess->fw_idx_to_vb2_idx[index] == vb->vb2_buf.index)
+            break;
+    h264_multi_recycle(sess->core, index);
 }
 
 static int codec_h264_drain_step(struct amvdec_session *sess)
@@ -5263,18 +5322,12 @@ unlock:
 
 static int codec_h264_can_recycle(struct amvdec_core *core)
 {
-	if (core->platform->revision == VDEC_REVISION_SC2)
-		return 1;
 	return !amvdec_read_dos(core, AV_SCRATCH_7) ||
 	       !amvdec_read_dos(core, AV_SCRATCH_8);
 }
 
 static void codec_h264_recycle(struct amvdec_core *core, u32 buf_idx)
 {
-	if (core->platform->revision == VDEC_REVISION_SC2) {
-		h264_multi_recycle(core, buf_idx);
-		return;
-	}
 	/*
 	 * Tell the firmware it can recycle this buffer.
 	 * AV_SCRATCH_8 serves the same purpose.
@@ -5696,4 +5749,5 @@ struct amvdec_codec_ops codec_h264_ops = {
 	.input_committed = codec_h264_input_committed,
 	.input_read_pointer = codec_h264_input_read_pointer,
 	.drain_step = codec_h264_drain_step,
+	.capture_queued = codec_h264_capture_queued,
 };

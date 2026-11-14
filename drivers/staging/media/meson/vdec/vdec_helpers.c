@@ -521,7 +521,7 @@ void amvdec_src_change(struct amvdec_session *sess, u32 width,
 	 * Check if the capture queue is already configured well for our
 	 * usecase. If so, keep decoding with it and do not send the event
 	 */
-	if (sess->streamon_cap &&
+	if (!READ_ONCE(sess->source_change_pending) && sess->streamon_cap &&
 	    sess->width == width &&
 	    sess->height == height &&
 	    dpb_size <= sess->num_dst_bufs &&

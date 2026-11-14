@@ -65,6 +65,10 @@ static int vdec_codec_needs_recycle(struct amvdec_session *sess)
 {
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 
+	if (sess->core->platform->revision == VDEC_REVISION_SC2 &&
+	    codec_ops->capture_queued)
+		return 0;
+
 	return codec_ops->can_recycle && codec_ops->recycle;
 }
 
@@ -315,6 +319,13 @@ static void vdec_vb2_buf_queue(struct vb2_buffer *vb)
 		return;
 
 	if (sess->streamon_cap &&
+	    (sess->status == STATUS_RUNNING || sess->status == STATUS_NEEDS_RESUME) &&
+	    vb->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
+	    sess->core->platform->revision == VDEC_REVISION_SC2 &&
+	    sess->fmt_out->codec_ops->capture_queued)
+		sess->fmt_out->codec_ops->capture_queued(sess, vbuf);
+
+	if (sess->streamon_cap &&
 	    vb->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
 	    vdec_codec_needs_recycle(sess) &&
 	    (sess->core->platform->revision != VDEC_REVISION_SC2 ||
@@ -377,6 +388,11 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 			sess->processor_started = true;
 		}
 		sess->status = STATUS_RUNNING;
+		if (sess->draining) {
+			sess->drain_deadline = jiffies + msecs_to_jiffies(5000);
+			schedule_delayed_work(&sess->drain_work, 0);
+		}
+		schedule_work(&sess->esparser_queue_work);
 		return 0;
 	}
 
@@ -496,7 +512,9 @@ static void vdec_stop_streaming(struct vb2_queue *q)
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	struct amvdec_core *core = sess->core;
 	struct vb2_v4l2_buffer *buf;
-	sess->draining = false;
+	if (q->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ||
+	    !READ_ONCE(sess->source_change_pending))
+		sess->draining = false;
 	cancel_delayed_work_sync(&sess->drain_work);
 
 	if (sess->status == STATUS_RUNNING ||

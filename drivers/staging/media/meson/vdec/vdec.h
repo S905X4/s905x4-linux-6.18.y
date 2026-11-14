@@ -137,6 +137,8 @@ struct amvdec_ops {
  * @drain_step: optional SC2 host-DPB drain after all OUTPUT buffers are committed;
  *              0 waits, 1 means EOS was published, negative errors abort
  *              These input/drain callbacks run with the session mutex held.
+ * @capture_queued: optional synchronous SC2 CAPTURE return notification; replaces
+ *                  the recycle thread and also runs while awaiting source change
  * @manages_processor: SC2 codec starts its processor only after input and an
  *                     owned reconstruction surface are ready
  * @can_recycle: optional call to know if the codec is ready to recycle
@@ -164,6 +166,7 @@ struct amvdec_codec_ops {
 	void (*input_committed)(struct amvdec_session *sess, u32 offset, u32 bytes);
 	u32 (*input_read_pointer)(struct amvdec_session *sess);
 	int (*drain_step)(struct amvdec_session *sess);
+	void (*capture_queued)(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf);
 	int (*can_recycle)(struct amvdec_core *core);
 	void (*recycle)(struct amvdec_core *core, u32 buf_idx);
 	void (*drain)(struct amvdec_session *sess);
