@@ -25,6 +25,7 @@
 #include <media/videobuf2-dma-contig.h>
 
 #define DI_NAME "meson-sc2-di"
+#define DI_INPUT_PLANES 3
 #define DI_POST_CTRL 0x1701
 #define DI_POST_SIZE 0x1702
 #define DI_EI_CTRL3 0x1719
@@ -79,7 +80,7 @@ struct sc2_di {
 	void __iomem *power;
 	struct clk_bulk_data clks[4];
 	struct meson_canvas *canvas;
-	u8 canvas_id[4];
+	u8 canvas_id[DI_INPUT_PLANES + 2];
 	struct mutex lock;
 	spinlock_t contexts_lock;
 	struct list_head contexts;
@@ -152,9 +153,16 @@ static int di_canvas(struct sc2_di *di, unsigned int id, dma_addr_t addr,
 		MESON_CANVAS_BLKMODE_LINEAR, 0);
 }
 
+static bool di_is_planar(u32 format)
+{
+	return format == V4L2_PIX_FMT_YUV420M ||
+	       format == V4L2_PIX_FMT_YUV422M;
+}
+
 static bool di_is_420(u32 format)
 {
-	return format == V4L2_PIX_FMT_NV12M || format == V4L2_PIX_FMT_NV21M;
+	return format == V4L2_PIX_FMT_NV12M || format == V4L2_PIX_FMT_NV21M ||
+	       format == V4L2_PIX_FMT_YUV420M;
 }
 
 static int di_program(struct sc2_di_ctx *ctx,
@@ -166,6 +174,7 @@ static int di_program(struct sc2_di_ctx *ctx,
 	const struct v4l2_pix_format_mplane *in = &ctx->fmt[0];
 	const struct v4l2_pix_format_mplane *out = &ctx->fmt[1];
 	bool packed_in = in->pixelformat == V4L2_PIX_FMT_UYVY;
+	bool planar_in = di_is_planar(in->pixelformat);
 	bool packed_out = out->pixelformat == V4L2_PIX_FMT_UYVY;
 	bool chroma420_in = di_is_420(in->pixelformat);
 	bool chroma420_out = di_is_420(out->pixelformat);
@@ -178,7 +187,7 @@ static int di_program(struct sc2_di_ctx *ctx,
 	 */
 	for (p = 0; p < in->num_planes; p++) {
 		u32 pitch = in->plane_fmt[p].bytesperline;
-		u32 height = in->height >> (chroma420_in ? p : 0);
+		u32 height = in->height >> (chroma420_in && p != 0);
 		dma_addr_t addr = vb2_dma_contig_plane_dma_addr(&src->vb2_buf, p) +
 			src->vb2_buf.planes[p].data_offset;
 
@@ -192,7 +201,7 @@ static int di_program(struct sc2_di_ctx *ctx,
 		dma_addr_t addr = vb2_dma_contig_plane_dma_addr(&dst->vb2_buf, p) +
 			dst->vb2_buf.planes[p].data_offset;
 
-		ret = di_canvas(di, p + 2, addr,
+		ret = di_canvas(di, p + DI_INPUT_PLANES, addr,
 			out->plane_fmt[p].bytesperline,
 			out->height >> (chroma420_out ? p : 0));
 		if (ret)
@@ -203,13 +212,13 @@ static int di_program(struct sc2_di_ctx *ctx,
 	/* The newer EI filter requires at least 80 output pixels. */
 	di_write(di, DI_EI_CTRL3, (r->width >= 80 ? BIT(31) : 0) | 0x13);
 	di_write(di, IF0_BASE + IF_GEN3, (3 << 4) | (burst_len << 1));
-	/* SC2 set_di_mif_v3: packed422 has no separate chroma canvas/map. */
-	di_write(di, IF0_BASE + IF_GEN2, packed_in ? 0 :
+	/* Three-plane input uses separate U/V canvases with no NV chroma map. */
+	di_write(di, IF0_BASE + IF_GEN2, packed_in || planar_in ? 0 :
 		 (in->pixelformat == V4L2_PIX_FMT_NV21M ||
 		  in->pixelformat == V4L2_PIX_FMT_NV61M ? 1 : 2));
 	di_write(di, IF0_BASE + IF_CANVAS, di->canvas_id[0] |
 		 (packed_in ? 0 : (di->canvas_id[1] << 8) |
-		  (di->canvas_id[1] << 16)));
+		  (di->canvas_id[planar_in ? 2 : 1] << 16)));
 	di_write(di, IF0_BASE + IF_X,
 		 ((r->left + r->width - 1) << 16) | r->left);
 	di_write(di, IF0_BASE + IF_Y,
@@ -242,8 +251,8 @@ static int di_program(struct sc2_di_ctx *ctx,
 		 (packed_in ? BIT(14) : BIT(1)));
 	di_write(di, DIWR_X, r->width - 1);
 	di_write(di, DIWR_Y, r->height - 1);
-	di_write(di, DIWR_CANVAS, di->canvas_id[2] |
-		 (packed_out ? 0 : di->canvas_id[3] << 8));
+	di_write(di, DIWR_CANVAS, di->canvas_id[DI_INPUT_PLANES] |
+		 (packed_out ? 0 : di->canvas_id[DI_INPUT_PLANES + 1] << 8));
 	/* SC2 set_wrmif_simple_v3 mode0 writes one-plane 8-bit packed422.
 	 * Canvas endian0 and MIF little-endian produce linear U,Y0,V,Y1.
 	 * Semiplanar 8-bit uses the observed physical mode2 Y+UV layout, not
@@ -574,6 +583,13 @@ static int di_enum_fmt(struct file *file, void *fh, struct v4l2_fmtdesc *f)
 	case 4:
 		f->pixelformat = V4L2_PIX_FMT_NV61M;
 		break;
+	case 5:
+	case 6:
+		if (!V4L2_TYPE_IS_OUTPUT(f->type))
+			return -EINVAL;
+		f->pixelformat = f->index == 5 ? V4L2_PIX_FMT_YUV420M :
+					       V4L2_PIX_FMT_YUV422M;
+		break;
 	default:
 		return -EINVAL;
 	}
@@ -583,6 +599,7 @@ static int di_enum_fmt(struct file *file, void *fh, struct v4l2_fmtdesc *f)
 static int di_try_fmt(struct file *file, void *fh, struct v4l2_format *f)
 {
 	struct v4l2_pix_format_mplane *p = &f->fmt.pix_mp;
+	bool planar = V4L2_TYPE_IS_OUTPUT(f->type) && di_is_planar(p->pixelformat);
 	unsigned int i;
 	u32 alignment = V4L2_TYPE_IS_OUTPUT(f->type) ? 32 : 64;
 	u32 min_pitch;
@@ -590,22 +607,23 @@ static int di_try_fmt(struct file *file, void *fh, struct v4l2_format *f)
 	if (p->pixelformat != V4L2_PIX_FMT_NV21M &&
 	    p->pixelformat != V4L2_PIX_FMT_NV16M &&
 	    p->pixelformat != V4L2_PIX_FMT_NV61M &&
-	    p->pixelformat != V4L2_PIX_FMT_UYVY)
+	    p->pixelformat != V4L2_PIX_FMT_UYVY && !planar)
 		p->pixelformat = V4L2_PIX_FMT_NV12M;
 	p->width = clamp_t(u32, ALIGN(p->width, 2), 32, 1920);
 	p->height = clamp_t(u32, ALIGN(p->height, 4), 32, 1088);
-	p->num_planes = p->pixelformat == V4L2_PIX_FMT_UYVY ? 1 : 2;
-	min_pitch = p->width * (p->num_planes == 1 ? 2 : 1);
+	p->num_planes = planar ? 3 : p->pixelformat == V4L2_PIX_FMT_UYVY ? 1 : 2;
 	if (!V4L2_TYPE_IS_OUTPUT(f->type))
 		p->field = V4L2_FIELD_NONE;
 	else if (p->field != V4L2_FIELD_INTERLACED_BT)
 		p->field = V4L2_FIELD_INTERLACED_TB;
 	for (i = 0; i < p->num_planes; i++) {
+		min_pitch = planar && i ? p->width / 2 :
+			    p->width * (p->num_planes == 1 ? 2 : 1);
 		/* SC2 DIWR uses 64-byte bursts; a 32-byte-only stride aliases rows. */
 		p->plane_fmt[i].bytesperline = ALIGN(clamp_t(u32,
 			p->plane_fmt[i].bytesperline, min_pitch, 4096), alignment);
 		p->plane_fmt[i].sizeimage = p->plane_fmt[i].bytesperline *
-			(p->height >> (di_is_420(p->pixelformat) ? i : 0));
+			(p->height >> (di_is_420(p->pixelformat) && i != 0));
 	}
 	memset(&p->plane_fmt[p->num_planes], 0,
 	       sizeof(p->plane_fmt) - p->num_planes * sizeof(p->plane_fmt[0]));
