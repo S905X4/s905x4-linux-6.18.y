@@ -631,7 +631,7 @@ int meson_sc2_av1_surface_alloc(struct meson_sc2_hw *hw,
 	return sc2_surface_alloc(hw, surface, width, height, 8, true);
 }
 
-/* AMF0 keeps every absolute scatter-page address inside one exported object. */
+/* AMF0/AMF8 keep all absolute scatter-page addresses inside the exported object. */
 u32 meson_sc2_hevc_fbc_size(u32 width, u32 height)
 {
 	u32 header = sc2_fbc_header_alloc_size(width, height);
@@ -753,10 +753,10 @@ free_owner:
 
 int meson_sc2_hevc_fbc_bind(struct meson_sc2_hevc_context *ctx,
 			   struct meson_sc2_surface *surface,
-			   u32 width, u32 height, void *cpu, dma_addr_t dma,
-			   size_t size, struct dma_buf *buffer)
+			   u32 width, u32 height, u8 depth, void *cpu,
+			   dma_addr_t dma, size_t size, struct dma_buf *buffer)
 {
-	return sc2_fbc_bind(ctx, surface, width, height, 10, 0x200, true, false,
+	return sc2_fbc_bind(ctx, surface, width, height, depth, 0x200, true, false,
 			    cpu, dma, size, buffer);
 }
 
@@ -1253,13 +1253,16 @@ static int sc2_validate_job(struct meson_sc2_hevc_context *ctx,
 	if (job->output_stride != ALIGN(width, 64) || job->output_uv_offset != uv ||
 	    job->output_buffer->size < job->output_size)
 		return -EINVAL;
-	if (sps->bit_depth_luma_minus8 == 2) {
-		if (job->output_format != V4L2_PIX_FMT_AMLOGIC_FBC10 ||
+	if (job->output_format == V4L2_PIX_FMT_AMLOGIC_FBC8 ||
+	    job->output_format == V4L2_PIX_FMT_AMLOGIC_FBC10) {
+		if ((job->output_format == V4L2_PIX_FMT_AMLOGIC_FBC10) !=
+		    (sps->bit_depth_luma_minus8 == 2) ||
 		    !job->destination->capture_owned ||
 		    job->output_size != meson_sc2_hevc_fbc_size(width, height) ||
 		    !ctx->dw8 || ctx->dw8_size < uv + uv / 2)
 			return -EINVAL;
-	} else if ((job->output_format != V4L2_PIX_FMT_NV12 &&
+	} else if (sps->bit_depth_luma_minus8 ||
+		   (job->output_format != V4L2_PIX_FMT_NV12 &&
 		    job->output_format != V4L2_PIX_FMT_NV21) ||
 		   job->destination->capture_owned || job->output_size < uv + uv / 2) {
 		return -EINVAL;

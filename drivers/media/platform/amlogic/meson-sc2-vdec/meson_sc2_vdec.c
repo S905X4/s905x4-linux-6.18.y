@@ -15,6 +15,7 @@
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-mem2mem.h>
 #include <media/videobuf2-dma-contig.h>
+#include <media/videobuf2-vmalloc.h>
 
 #include "meson_sc2_hw.h"
 #include "meson_sc2_stateful.h"
@@ -89,12 +90,20 @@ static struct v4l2_pix_format_mplane *sc2_format(struct sc2_ctx *ctx,
 	return V4L2_TYPE_IS_OUTPUT(type) ? &ctx->source_fmt : &ctx->capture_fmt;
 }
 
+static bool sc2_capture_fbc(u32 fourcc)
+{
+	return fourcc == V4L2_PIX_FMT_AMLOGIC_FBC8 ||
+		fourcc == V4L2_PIX_FMT_AMLOGIC_FBC10;
+}
+
 static void sc2_capture_format(struct sc2_ctx *ctx,
 			       struct v4l2_pix_format_mplane *pix)
 {
-	bool fbc = pix->pixelformat == V4L2_PIX_FMT_AMLOGIC_FBC10;
+	bool fbc = sc2_capture_fbc(pix->pixelformat) &&
+		(pix->pixelformat != V4L2_PIX_FMT_AMLOGIC_FBC8 ||
+		 ctx->source_fmt.pixelformat == V4L2_PIX_FMT_HEVC_SLICE);
 
-	pix->pixelformat = fbc ? V4L2_PIX_FMT_AMLOGIC_FBC10 :
+	pix->pixelformat = fbc ? pix->pixelformat :
 		pix->pixelformat == V4L2_PIX_FMT_NV21 ? V4L2_PIX_FMT_NV21 :
 		V4L2_PIX_FMT_NV12;
 	pix->width = ALIGN(ctx->source_fmt.width, 64);
@@ -182,7 +191,8 @@ static int sc2_enum_fmt(struct file *file, void *priv, struct v4l2_fmtdesc *f)
 {
 	struct sc2_ctx *ctx = sc2_file_ctx(file);
 	bool output = V4L2_TYPE_IS_OUTPUT(f->type);
-	unsigned int last = output ? 1 : 2;
+	unsigned int last = output ? 1 :
+		ctx->source_fmt.pixelformat == V4L2_PIX_FMT_HEVC_SLICE ? 3 : 2;
 
 	if (f->index > last)
 		return -EINVAL;
@@ -190,9 +200,18 @@ static int sc2_enum_fmt(struct file *file, void *priv, struct v4l2_fmtdesc *f)
 		f->pixelformat = f->index ? V4L2_PIX_FMT_AV1_FRAME : V4L2_PIX_FMT_HEVC_SLICE;
 		f->flags = V4L2_FMT_FLAG_COMPRESSED;
 	} else {
-		if (!f->index)
+		unsigned int index = f->index;
+
+		if (ctx->source_fmt.pixelformat == V4L2_PIX_FMT_HEVC_SLICE) {
+			if (!index) {
+				f->pixelformat = V4L2_PIX_FMT_AMLOGIC_FBC8;
+				return 0;
+			}
+			index--;
+		}
+		if (!index)
 			f->pixelformat = V4L2_PIX_FMT_NV12;
-		else if (f->index == 1)
+		else if (index == 1)
 			f->pixelformat = V4L2_PIX_FMT_AMLOGIC_FBC10;
 		else
 			f->pixelformat = V4L2_PIX_FMT_NV21;
@@ -207,7 +226,7 @@ static int sc2_enum_framesizes(struct file *file, void *priv,
 			f->pixel_format != V4L2_PIX_FMT_AV1_FRAME &&
 			f->pixel_format != V4L2_PIX_FMT_NV12 &&
 			f->pixel_format != V4L2_PIX_FMT_NV21 &&
-			f->pixel_format != V4L2_PIX_FMT_AMLOGIC_FBC10))
+			!sc2_capture_fbc(f->pixel_format)))
 		return -EINVAL;
 	f->type = V4L2_FRMSIZE_TYPE_STEPWISE;
 	f->stepwise.min_width = 64;
@@ -215,13 +234,13 @@ static int sc2_enum_framesizes(struct file *file, void *priv,
 		3840 : SC2_MAX_WIDTH;
 	f->stepwise.step_width = f->pixel_format == V4L2_PIX_FMT_NV12 ||
 		f->pixel_format == V4L2_PIX_FMT_NV21 ||
-		f->pixel_format == V4L2_PIX_FMT_AMLOGIC_FBC10 ? 64 : 2;
+		sc2_capture_fbc(f->pixel_format) ? 64 : 2;
 	f->stepwise.min_height = 64;
 	f->stepwise.max_height = f->pixel_format == V4L2_PIX_FMT_AV1_FRAME ?
 		2160 : SC2_MAX_HEIGHT;
 	f->stepwise.step_height = f->pixel_format == V4L2_PIX_FMT_NV12 ||
 		f->pixel_format == V4L2_PIX_FMT_NV21 ||
-		f->pixel_format == V4L2_PIX_FMT_AMLOGIC_FBC10 ? 64 : 2;
+		sc2_capture_fbc(f->pixel_format) ? 64 : 2;
 	return 0;
 }
 
@@ -385,7 +404,7 @@ static int sc2_buf_prepare(struct vb2_buffer *vb)
 	if (vb->planes[0].data_offset)
 		return -EINVAL;
 	/* Absolute scatter PFNs require driver-owned, physically contiguous storage. */
-	if (ctx->capture_fmt.pixelformat == V4L2_PIX_FMT_AMLOGIC_FBC10 &&
+	if (sc2_capture_fbc(ctx->capture_fmt.pixelformat) &&
 	    vb->memory != VB2_MEMORY_MMAP)
 		return -EOPNOTSUPP;
 	mutex_lock(&ctx->state_lock);
@@ -418,9 +437,10 @@ static int sc2_buf_prepare(struct vb2_buffer *vb)
 		else if (ctx->source_fmt.pixelformat == V4L2_PIX_FMT_AV1_FRAME)
 			ret = meson_sc2_av1_surface_alloc(ctx->dev->hw, &buf->surface,
 				ctx->source_fmt.width, ctx->source_fmt.height);
-		else if (ctx->capture_fmt.pixelformat == V4L2_PIX_FMT_AMLOGIC_FBC10)
+		else if (sc2_capture_fbc(ctx->capture_fmt.pixelformat))
 			ret = meson_sc2_hevc_fbc_bind(ctx->hwctx, &buf->surface,
 				ctx->source_fmt.width, ctx->source_fmt.height,
+				ctx->capture_fmt.pixelformat == V4L2_PIX_FMT_AMLOGIC_FBC10 ? 10 : 8,
 				vb2_plane_vaddr(vb, 0), vb2_dma_contig_plane_dma_addr(vb, 0),
 				vb2_plane_size(vb, 0), dmabuf);
 		else
@@ -543,7 +563,8 @@ static int sc2_queue_init(void *priv, struct vb2_queue *src,
 		q->io_modes = VB2_MMAP | VB2_DMABUF;
 		q->drv_priv = ctx;
 		q->ops = &sc2_queue_ops;
-		q->mem_ops = &vb2_dma_contig_memops;
+		/* Compressed OUTPUT is copied by the CPU into the coherent input ring. */
+		q->mem_ops = i ? &vb2_dma_contig_memops : &vb2_vmalloc_memops;
 		q->buf_struct_size = sizeof(struct sc2_buffer);
 		q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
 		q->lock = &ctx->dev->lock;
