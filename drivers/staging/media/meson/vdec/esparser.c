@@ -13,6 +13,7 @@
 #include <linux/module.h>
 #include <linux/reset.h>
 #include <linux/interrupt.h>
+#include <linux/dma-buf.h>
 #include <media/videobuf2-dma-contig.h>
 #include <media/v4l2-mem2mem.h>
 
@@ -336,7 +337,7 @@ esparser_queue(struct amvdec_session *sess, struct vb2_v4l2_buffer *vbuf)
 	struct amvdec_core *core = sess->core;
 	struct amvdec_codec_ops *codec_ops = sess->fmt_out->codec_ops;
 	u32 payload_size = vb2_get_plane_payload(vb, 0);
-	dma_addr_t phy = vb2_dma_contig_plane_dma_addr(vb, 0);
+	dma_addr_t phy;
 	u32 num_dst_bufs = 0;
 	u32 offset;
 	u32 pad_size;
@@ -436,6 +437,7 @@ input_error:
 		return ret;
 	}
 	pad_size = esparser_pad_start_code(core, vb, payload_size);
+	phy = vb2_dma_contig_plane_dma_addr(vb, 0);
 	ret = esparser_write_data(core, phy, payload_size + pad_size);
 
 	if (ret <= 0) {
@@ -489,10 +491,36 @@ void esparser_queue_all_src(struct work_struct *work)
 		return;
 	}
 	v4l2_m2m_for_each_src_buf_safe(sess->m2m_ctx, buf, n) {
+		struct dma_buf *input = NULL;
+		int ret, sync_ret;
+
 		if (sess->should_stop)
 			break;
 
-		if (esparser_queue(sess, &buf->vb) < 0)
+		if (sess->core->platform->revision == VDEC_REVISION_SC2)
+			input = buf->vb.vb2_buf.planes[0].dbuf;
+		if (input) {
+			/* Some codec framing helpers also update the submitted bytes. */
+			ret = dma_buf_begin_cpu_access(input, DMA_BIDIRECTIONAL);
+			if (ret) {
+				dev_err(sess->core->dev, "input CPU access failed: %d\n", ret);
+				amvdec_abort(sess);
+				break;
+			}
+		}
+		ret = esparser_queue(sess, &buf->vb);
+		/* The session/queue mutex still excludes DQBUF and teardown, even
+		 * when esparser_queue has marked this source buffer DONE.
+		 */
+		if (input) {
+			sync_ret = dma_buf_end_cpu_access(input, DMA_BIDIRECTIONAL);
+			if (sync_ret) {
+				dev_err(sess->core->dev, "input CPU release failed: %d\n", sync_ret);
+				amvdec_abort(sess);
+				break;
+			}
+		}
+		if (ret < 0)
 			break;
 	}
 	mutex_unlock(&sess->lock);

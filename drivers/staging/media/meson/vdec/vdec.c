@@ -19,6 +19,7 @@
 #include <media/v4l2-mem2mem.h>
 #include <media/v4l2-dev.h>
 #include <media/videobuf2-dma-contig.h>
+#include <media/videobuf2-vmalloc.h>
 #include <linux/pm_runtime.h>
 #include <linux/firmware/meson/meson_sm.h>
 #include "dos_regs.h"
@@ -1263,7 +1264,11 @@ static int m2m_queue_init(void *priv, struct vb2_queue *src_vq,
 	src_vq->io_modes = VB2_MMAP | VB2_DMABUF;
 	src_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
 	src_vq->ops = &vdec_vb2_ops;
-	src_vq->mem_ops = &vb2_dma_contig_memops;
+	/* SC2 copies compressed bytes into its coherent VIFIFO; only CAPTURE
+	 * and that hardware ring require physically contiguous DMA storage.
+	 */
+	src_vq->mem_ops = sess->core->platform->revision == VDEC_REVISION_SC2 ?
+		&vb2_vmalloc_memops : &vb2_dma_contig_memops;
 	src_vq->drv_priv = sess;
 	src_vq->buf_struct_size = sizeof(struct dummy_buf);
 	src_vq->min_queued_buffers = 1;
@@ -1651,3 +1656,4 @@ module_platform_driver(meson_vdec_driver);
 MODULE_DESCRIPTION("Meson video decoder driver for GXBB/GXL/GXM/G12/SM1/SC2");
 MODULE_AUTHOR("Maxime Jourdan <mjourdan@baylibre.com>");
 MODULE_LICENSE("GPL");
+MODULE_IMPORT_NS("DMA_BUF");
