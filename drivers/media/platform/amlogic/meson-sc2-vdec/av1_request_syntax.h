@@ -59,7 +59,7 @@ struct meson_av1_syntax_error {
 };
 
 /**
- * meson_av1_request_syntax() - controls-authoritative AV1 Main 8/10 4:2:0
+ * meson_av1_request_syntax() - controls-authoritative AV1 Main 8/10 4:2:0/mono
  *
  * Emits low-overhead, size-delimited optional SEQUENCE_HEADER, FRAME_HEADER,
  * and one TILE_GROUP containing every tile. No opaque header bytes are copied.
@@ -69,6 +69,12 @@ struct meson_av1_syntax_error {
  * fields and reference backing are NOT reconstructible from header syntax:
  * caller must preserve/install the control-authoritative history in firmware.
  * Feed software comparison decoders normalized requests in decode order too.
+ * Monochrome retains its sequence flag and emits only the applicable plane
+ * syntax; absent chroma controls must be zero except native-derived restoration
+ * sizes and qm_v inferred from the still-coded qm_u. Segmentation retains all
+ * eight features per segment; lossless inference includes validated zero UV
+ * deltas. Monochrome film-grain sequences/requests are unsupported. This syntax
+ * support does not establish hardware monochrome output or neutral chroma.
  *
  * Native ABI omissions are canonicalized: full (not reduced-still) header;
  * no timing/decoder model/frame IDs (caller must validate source current,
@@ -104,11 +110,14 @@ struct meson_av1_syntax_error {
  * Success sets *length; failure sets it to zero, destination unspecified.
  * -ENODATA: absent authority; -EINVAL: inconsistent controls/spans; -ERANGE:
  * unencodable integer/overflow; -ENOSPC: destination; -EOPNOTSUPP: non-Main,
- * non-4:2:0 or unknown tool flags. Errors carry static reasons and tile index.
+ * chroma other than 4:2:0/monochrome, monochrome grain or unknown tool flags.
+ * Errors carry static reasons and tile index.
  *
  * Authority: include/uapi/linux/v4l2-controls.h AV1 controls; AV1 spec sections
  * 5.5, 5.9, 5.10; FFmpeg cbs_av1_syntax_template.c sequence_header_obu,
- * uncompressed_header, tile_info, global_motion_params, film_grain_params;
+ * color_config, quantization_params, segmentation_params, loop_filter_params,
+ * cdef_params, lr_params, uncompressed_header (coded_lossless/all_lossless),
+ * tile_info, global_motion_params, film_grain_params;
  * av1dec.c read_global_param; v4l2_request_av1.c fill_sequence/fill_frame/
  * fill_film_grain/decode_slice. In particular native restoration enum values
  * differ from wire values, GM parameters are resolved fixed-point values (not

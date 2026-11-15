@@ -682,12 +682,14 @@ static int sc2_av1_validate(struct meson_sc2_hevc_context *ctx,
                  f->frame_type == V4L2_AV1_INTRA_ONLY_FRAME;
 
     /* Full-depth Main10 is the native first-write FBC surface, never DW8. */
+    /* Mono10 reconstructs luma, but the observed FBC chroma is 128, not
+     * neutral 512. Keep it rejected rather than exporting incorrect YU10. */
     if (s->seq_profile || (s->bit_depth != 8 && s->bit_depth != 10) ||
         width < 64 || height < 64 || width > 3840 || height > 2160 || (height & 1) ||
         f->upscaled_width < width || f->upscaled_width > 3840 ||
         (f->upscaled_width & 1) ||
-        (s->flags & (V4L2_AV1_SEQUENCE_FLAG_MONO_CHROME |
-                     V4L2_AV1_SEQUENCE_FLAG_FILM_GRAIN_PARAMS_PRESENT)) ||
+        (s->flags & V4L2_AV1_SEQUENCE_FLAG_FILM_GRAIN_PARAMS_PRESENT) ||
+        (s->bit_depth == 10 && (s->flags & V4L2_AV1_SEQUENCE_FLAG_MONO_CHROME)) ||
         (s->flags & (V4L2_AV1_SEQUENCE_FLAG_SUBSAMPLING_X |
                      V4L2_AV1_SEQUENCE_FLAG_SUBSAMPLING_Y)) !=
                     (V4L2_AV1_SEQUENCE_FLAG_SUBSAMPLING_X |

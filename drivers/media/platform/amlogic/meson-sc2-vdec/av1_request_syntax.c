@@ -211,11 +211,13 @@ static void sequence_header(struct av1_bits *b, struct av1_syntax *s)
 	put(b, 1, SF(s, ENABLE_CDEF));
 	put(b, 1, SF(s, ENABLE_RESTORATION));
 	put(b, 1, q->bit_depth == 10);
-	put(b, 1, 0); /* monochrome */
+	put(b, 1, SF(s, MONO_CHROME));
 	put(b, 1, 0); /* color description unspecified */
 	put(b, 1, SF(s, COLOR_RANGE));
-	put(b, 2, 0); /* chroma_sample_position unspecified */
-	put(b, 1, SF(s, SEPARATE_UV_DELTA_Q));
+	if (!SF(s, MONO_CHROME)) {
+		put(b, 2, 0); /* chroma_sample_position unspecified */
+		put(b, 1, SF(s, SEPARATE_UV_DELTA_Q));
+	}
 	put(b, 1, SF(s, FILM_GRAIN_PARAMS_PRESENT));
 	align_bits(b, true);
 }
@@ -337,22 +339,29 @@ static void quantization(struct av1_bits *b, struct av1_syntax *s)
 	CHECK(b, !(q->flags & ~7U), -EOPNOTSUPP, "unknown quantization flags");
 	put(b, 8, q->base_q_idx);
 	delta_q(b, q->delta_q_y_dc);
-	if (SF(s, SEPARATE_UV_DELTA_Q))
-		put(b, 1, diff);
-	else
-		CHECK(b, !diff, -EINVAL, "UV delta requires separate UV sequence flag");
-	delta_q(b, q->delta_q_u_dc);
-	delta_q(b, q->delta_q_u_ac);
-	if (diff) {
-		delta_q(b, q->delta_q_v_dc);
-		delta_q(b, q->delta_q_v_ac);
+	if (SF(s, MONO_CHROME)) {
+		CHECK(b, !diff && !q->delta_q_u_dc && !q->delta_q_u_ac &&
+		      !q->delta_q_v_dc && !q->delta_q_v_ac,
+		      -EINVAL, "monochrome chroma quantizer state");
 	} else {
-		CHECK(b, q->delta_q_v_dc == q->delta_q_u_dc && q->delta_q_v_ac == q->delta_q_u_ac,
-		      -EINVAL, "inferred V quantizer mismatch");
+		if (SF(s, SEPARATE_UV_DELTA_Q))
+			put(b, 1, diff);
+		else
+			CHECK(b, !diff, -EINVAL, "UV delta requires separate UV sequence flag");
+		delta_q(b, q->delta_q_u_dc);
+		delta_q(b, q->delta_q_u_ac);
+		if (diff) {
+			delta_q(b, q->delta_q_v_dc);
+			delta_q(b, q->delta_q_v_ac);
+		} else {
+			CHECK(b, q->delta_q_v_dc == q->delta_q_u_dc && q->delta_q_v_ac == q->delta_q_u_ac,
+			      -EINVAL, "inferred V quantizer mismatch");
+		}
 	}
 	put(b, 1, !!(q->flags & V4L2_AV1_QUANTIZATION_FLAG_USING_QMATRIX));
 	if (q->flags & V4L2_AV1_QUANTIZATION_FLAG_USING_QMATRIX) {
 		put(b, 4, q->qm_y);
+		/* CBS quantization_params codes qm_u even for monochrome. */
 		put(b, 4, q->qm_u);
 		if (SF(s, SEPARATE_UV_DELTA_Q))
 			put(b, 4, q->qm_v);
@@ -387,6 +396,9 @@ static void segmentation(struct av1_bits *b, struct av1_syntax *s)
 			put(b, 1, update);
 		}
 	}
+	/* Mono chroma deltas were validated as zero, not ignored. Segmentation
+	 * still codes all eight features per segment regardless of plane count.
+	 */
 	s->lossless = !q->delta_q_y_dc && !q->delta_q_u_dc && !q->delta_q_u_ac &&
 		!q->delta_q_v_dc && !q->delta_q_v_ac;
 	for (i = 0; i < 8; i++) {
@@ -446,6 +458,15 @@ static void filters(struct av1_bits *b, struct av1_syntax *s)
 	unsigned int i;
 
 	CHECK(b, !(lf->flags & ~15U), -EOPNOTSUPP, "unknown loop filter flags");
+	if (SF(s, MONO_CHROME)) {
+		CHECK(b, !lf->level[2] && !lf->level[3],
+		      -EINVAL, "monochrome chroma loop filter levels");
+		for (i = 0; i < ARRAY_SIZE(c->uv_pri_strength); i++)
+			CHECK(b, !c->uv_pri_strength[i] && !c->uv_sec_strength[i],
+			      -EINVAL, "monochrome chroma CDEF strengths");
+		CHECK(b, !lr->frame_restoration_type[1] && !lr->frame_restoration_type[2] &&
+		      !lr->lr_uv_shift, -EINVAL, "monochrome chroma restoration state");
+	}
 	if (q->base_q_idx)
 		put(b, 1, dq);
 	else
@@ -469,7 +490,7 @@ static void filters(struct av1_bits *b, struct av1_syntax *s)
 	if (!s->lossless && !FF(s, ALLOW_INTRABC)) {
 		put(b, 6, lf->level[0]);
 		put(b, 6, lf->level[1]);
-		if (lf->level[0] || lf->level[1]) {
+		if (!SF(s, MONO_CHROME) && (lf->level[0] || lf->level[1])) {
 			put(b, 6, lf->level[2]);
 			put(b, 6, lf->level[3]);
 		} else {
@@ -505,8 +526,10 @@ static void filters(struct av1_bits *b, struct av1_syntax *s)
 		for (i = 0; i < (1U << c->bits); i++) {
 			put(b, 4, c->y_pri_strength[i]);
 			put(b, 2, c->y_sec_strength[i]);
-			put(b, 4, c->uv_pri_strength[i]);
-			put(b, 2, c->uv_sec_strength[i]);
+			if (!SF(s, MONO_CHROME)) {
+				put(b, 4, c->uv_pri_strength[i]);
+				put(b, 2, c->uv_sec_strength[i]);
+			}
 		}
 	} else {
 		CHECK(b, !c->bits && !c->damping_minus_3 && !c->y_pri_strength[0] &&
@@ -528,7 +551,7 @@ static void filters(struct av1_bits *b, struct av1_syntax *s)
 	      -EINVAL, "derived restoration flags mismatch");
 	if (!(s->lossless && f->upscaled_width == f->frame_width_minus_1 + 1) &&
 	    !FF(s, ALLOW_INTRABC) && SF(s, ENABLE_RESTORATION)) {
-		for (i = 0; i < 3; i++)
+		for (i = 0; i < (SF(s, MONO_CHROME) ? 1 : 3); i++)
 			put(b, 2, lr_wire[lr->frame_restoration_type[i]]);
 		if (uses_lr) {
 			increment(b, lr->lr_unit_shift, SF(s, USE_128X128_SUPERBLOCK) ? 1 : 0, 2);
@@ -538,6 +561,9 @@ static void filters(struct av1_bits *b, struct av1_syntax *s)
 				CHECK(b, !lr->lr_uv_shift, -EINVAL, "chroma restoration shift without chroma LR");
 			if (b->status)
 				return;
+			/* Native fill_frame derives all three sizes even for mono;
+			 * only the restoration types above are plane-count limited.
+			 */
 			for (i = 0; i < 3; i++)
 				CHECK(b, lr->loop_restoration_size[i] ==
 				      (1U << (6 + lr->lr_unit_shift - (i ? lr->lr_uv_shift : 0))),
@@ -546,6 +572,10 @@ static void filters(struct av1_bits *b, struct av1_syntax *s)
 	} else {
 		CHECK(b, !uses_lr, -EINVAL, "restoration disabled by sequence/lossless/intrabc");
 	}
+	if (SF(s, MONO_CHROME) && !uses_lr)
+		CHECK(b, !lr->lr_unit_shift && !lr->loop_restoration_size[0] &&
+		      !lr->loop_restoration_size[1] && !lr->loop_restoration_size[2],
+		      -EINVAL, "monochrome unused restoration state");
 }
 
 static int relative_dist(unsigned int a, unsigned int z, unsigned int bits)
@@ -921,8 +951,15 @@ static void prepare(struct av1_bits *b, struct av1_syntax *s)
 	CHECK(b, !(q->flags & ~0xfffffU) && !(f->flags & ~0xfffffU),
 	      -EOPNOTSUPP, "unknown sequence/frame tool flags");
 	CHECK(b, !q->seq_profile && (q->bit_depth == 8 || q->bit_depth == 10) &&
-	      !SF(s, MONO_CHROME) && SF(s, SUBSAMPLING_X) && SF(s, SUBSAMPLING_Y),
-	      -EOPNOTSUPP, "only AV1 Main 8/10-bit 4:2:0 supported");
+	      SF(s, SUBSAMPLING_X) && SF(s, SUBSAMPLING_Y),
+	      -EOPNOTSUPP, "only AV1 Main 8/10-bit 4:2:0 or monochrome supported");
+	if (SF(s, MONO_CHROME)) {
+		CHECK(b, !SF(s, SEPARATE_UV_DELTA_Q),
+		      -EINVAL, "monochrome separate UV delta Q");
+		CHECK(b, !SF(s, FILM_GRAIN_PARAMS_PRESENT) &&
+		      (!r->film_grain || !(r->film_grain->flags & V4L2_AV1_FILM_GRAIN_FLAG_APPLY_GRAIN)),
+		      -EOPNOTSUPP, "monochrome film grain unsupported");
+	}
 	CHECK(b, SF(s, ENABLE_ORDER_HINT) ? q->order_hint_bits >= 1 && q->order_hint_bits <= 8 :
 	      !q->order_hint_bits, -EINVAL, "sequence order hint width");
 	CHECK(b, SF(s, ENABLE_ORDER_HINT) || (!SF(s, ENABLE_JNT_COMP) && !SF(s, ENABLE_REF_FRAME_MVS)),
