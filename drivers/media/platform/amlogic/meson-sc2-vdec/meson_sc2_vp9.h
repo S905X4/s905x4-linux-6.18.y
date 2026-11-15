@@ -516,11 +516,11 @@ static int sc2_vp9_run(struct meson_sc2_hevc_context *ctx,
    smp_load_acquire(&hw->irq_sequence) != seq, remaining);
  }
 }
-/* An orphaned CAPTURE reference still owns its original FBC and MV storage.
- * A repeat needs a buffer in the current queue. Relocate only the compressed
+/* A reference may have left CAPTURE or still be held by a consumer.
+ * A repeat needs an available current-queue buffer. Copy only compressed
  * display bytes; the original DPB/MV and previous-picture identity stay put.
  */
-static int sc2_vp9_display_detached(struct meson_sc2_hevc_context *ctx,
+static int sc2_vp9_prepare_display(struct meson_sc2_hevc_context *ctx,
                                   const struct meson_sc2_vp9_job *job,
                                   struct sc2_surface_owner *owner, int *slot_index)
 {
@@ -539,7 +539,7 @@ static int sc2_vp9_display_detached(struct meson_sc2_hevc_context *ctx,
  int n;
 
  source_owner = container_of(src, struct sc2_surface_owner, surface);
- if (!source_owner->detached)
+ if (!source_owner->detached && !picture->outstanding)
   return 0;
  if (src->dma == dst->dma || src->size != dst->size ||
      src->width != dst->width || src->height != dst->height ||
@@ -627,7 +627,7 @@ static int sc2_vp9_repeat(struct meson_sc2_hevc_context *ctx,
  if (!dst || dst->width != ref->width || dst->height != ref->height ||
      dst->depth != ref->depth)
   return -EPIPE;
- ret = sc2_vp9_display_detached(ctx, job, owner, &slot);
+ ret = sc2_vp9_prepare_display(ctx, job, owner, &slot);
  if (ret)
   return ret;
  if (!sc2_surface_guards(st->slot[slot].surface))
