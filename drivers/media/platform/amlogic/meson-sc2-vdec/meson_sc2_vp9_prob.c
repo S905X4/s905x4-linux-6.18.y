@@ -443,7 +443,8 @@ void meson_sc2_vp9_adapt_prob(int prev_kf, int cur_kf, int pre_fc,
 			else if (coef_count_node_start ==
 					VP9_MV_BITS_1_COUNT_START)
 				coef_node_start = VP9_MV_BITS_1_START;
-			else /* node_start == VP9_MV_CLASS0_HP_0_COUNT_START */
+			else if (coef_count_node_start ==
+					VP9_MV_CLASS0_HP_0_COUNT_START)
 				coef_node_start = VP9_MV_CLASS0_HP_0_START;
 
 			den = count[coef_count_node_start] +
