@@ -45,12 +45,26 @@ struct sc2_avs2_picture {
 	bool valid;
 };
 
+/* Only encoded bytes survive a CAPTURE restart, never firmware RAM or DPB
+ * identities. Cache consumed header-only AUs rooted at the most recent sequence
+ * header until the frontend consumes the next picture. Backend completion is
+ * not consumption: STREAMOFF may cancel the worker before it returns SRC.
+ */
+struct sc2_avs2_headers {
+	u8 *data;
+	size_t size;
+	bool replay;
+};
+
 struct sc2_avs2_state {
 	struct avs2_decoder dec;
 	struct sc2_avs2_picture picture[AVS2_MAX_BUFFER_NUM];
 	u32 iqit[1024];
 	u32 start_flag, decode_count;
 	bool iqit_valid;
+	struct sc2_avs2_headers headers;
+	struct sc2_avs2_headers pending_headers;
+	bool headers_pending;
 };
 
 static const u16 sc2_avs2_wq4[16] = {
@@ -74,6 +88,8 @@ static void sc2_avs2_reset(struct meson_sc2_hevc_context *ctx)
 
 	if (!st)
 		return;
+	kvfree(st->headers.data);
+	kvfree(st->pending_headers.data);
 	memset(st, 0, sizeof(*st));
 	init_avs2_decoder(&st->dec);
 	st->dec.ref_maxbuffer = REF_MAXBUFFER;
@@ -84,8 +100,9 @@ static void sc2_avs2_reset(struct meson_sc2_hevc_context *ctx)
 	memset(ctx->work, 0, A2_WORK_SIZE);
 }
 
-/* Decoder failure retires its references, not presentations already handed
- * to userspace. Their QBUF must still release the original slot ownership.
+/* Decoder failure retires references, not presentations already handed to
+ * userspace. Keep consumed headers until the frontend acknowledges SRC: an
+ * abort may leave that source queued for a CAPTURE restart instead.
  */
 static void sc2_avs2_error_reset(struct meson_sc2_hevc_context *ctx)
 {
@@ -98,6 +115,10 @@ static void sc2_avs2_error_reset(struct meson_sc2_hevc_context *ctx)
 		if (!held[i])
 			memset(&st->picture[i], 0, sizeof(st->picture[i]));
 	}
+	kvfree(st->pending_headers.data);
+	memset(&st->pending_headers, 0, sizeof(st->pending_headers));
+	st->headers_pending = false;
+	st->headers.replay = true;
 	init_avs2_decoder(&st->dec);
 	avs2_init_global_buffers(&st->dec);
 	for (i = 0; i < AVS2_MAX_BUFFER_NUM; i++)
@@ -110,8 +131,38 @@ static void sc2_avs2_error_reset(struct meson_sc2_hevc_context *ctx)
 
 static void sc2_avs2_release(struct meson_sc2_hevc_context *ctx)
 {
+	if (ctx->avs2) {
+		kvfree(ctx->avs2->headers.data);
+		kvfree(ctx->avs2->pending_headers.data);
+	}
 	kfree(ctx->avs2);
 	ctx->avs2 = NULL;
+}
+
+/* Called only when the frontend actually removes the head source buffer.
+ * A successful header-only submission becomes replay authority at this point.
+ */
+void meson_sc2_avs2_source_consumed(struct meson_sc2_hevc_context *ctx,
+				    bool picture, int status)
+{
+	struct sc2_avs2_state *st;
+
+	mutex_lock(&ctx->hw->lock);
+	st = ctx->avs2;
+	if (st) {
+		if (picture || status) {
+			kvfree(st->headers.data);
+			memset(&st->headers, 0, sizeof(st->headers));
+		} else if (st->headers_pending) {
+			kvfree(st->headers.data);
+			st->headers = st->pending_headers;
+			st->pending_headers.data = NULL;
+		}
+		kvfree(st->pending_headers.data);
+		memset(&st->pending_headers, 0, sizeof(st->pending_headers));
+		st->headers_pending = false;
+	}
+	mutex_unlock(&ctx->hw->lock);
 }
 
 static int sc2_avs2_alloc(struct meson_sc2_hevc_context *ctx)
@@ -124,6 +175,103 @@ static int sc2_avs2_alloc(struct meson_sc2_hevc_context *ctx)
 	if (!ctx->avs2)
 		return -ENOMEM;
 	sc2_avs2_reset(ctx);
+	return 0;
+}
+
+/* The frontend has stopped its worker and returned every presentation before
+ * this call. Retire the old DPB exactly as for a flush, but retain the encoded
+ * sequence needed by the still-queued picture that reported -EPIPE.
+ */
+int meson_sc2_avs2_capture_restart(struct meson_sc2_hevc_context *ctx)
+{
+	struct sc2_avs2_headers headers;
+	struct sc2_surface_owner *owner;
+	int ret = 0;
+
+	if (!ctx)
+		return -EINVAL;
+	mutex_lock(&ctx->hw->lock);
+	if (ctx->hw->fatal) {
+		ret = -EIO;
+		goto out;
+	}
+	list_for_each_entry(owner, &ctx->hw->surfaces, list)
+		if (owner->context == ctx)
+			owner->surface.valid = false;
+	atomic_set(&ctx->aborted, 0);
+	if (ctx->avs2) {
+		headers = ctx->avs2->headers;
+		memset(&ctx->avs2->headers, 0, sizeof(ctx->avs2->headers));
+		sc2_avs2_reset(ctx);
+		headers.replay = true;
+		ctx->avs2->headers = headers;
+	}
+out:
+	mutex_unlock(&ctx->hw->lock);
+	return ret;
+}
+
+/* Prepare a header-only replacement without changing the live cache. The
+ * frontend commits it when consuming SRC, not merely when decode returns.
+ * Stop at the first picture; its queued AU already owns its encoded prefix.
+ * This does not broaden firmware acceptance: B5-only input with no recognized
+ * header notification still fails the existing header-only completion check.
+ */
+static int sc2_avs2_cache_headers(struct sc2_avs2_state *st,
+				 const struct meson_sc2_avs2_job *job,
+				 struct sc2_avs2_headers *next,
+				 bool *update, size_t *replay)
+{
+	const u8 *data = job->data;
+	size_t i, begin = 0, keep = st->headers.size;
+	bool picture = false, replace = false, sequence_end = false;
+
+	*update = false;
+	*replay = 0;
+	for (i = 0; i + 3 < job->size; i++) {
+		if (data[i] || data[i + 1] || data[i + 2] != 1)
+			continue;
+		if (data[i + 3] == SEQUENCE_END_CODE) {
+			sequence_end = true;
+			keep = 0;
+			replace = true;
+		} else if (data[i + 3] == SEQUENCE_HEADER_CODE) {
+			begin = i;
+			keep = 0;
+			replace = true;
+			sequence_end = false;
+		} else if (data[i + 3] == I_PICTURE_START_CODE ||
+			   data[i + 3] == PB_PICTURE_START_CODE) {
+			picture = true;
+			break;
+		}
+		i += 3;
+	}
+	/* An AU carrying its own sequence (or end) must not inherit old bytes. */
+	if (st->headers.replay && !replace)
+		*replay = st->headers.size;
+	if (picture)
+		return 0;
+	if (sequence_end) {
+		*update = true;
+		return 0;
+	}
+	/* Without an encoded sequence root there is nothing reconstructible. */
+	if (!keep && !replace)
+		return 0;
+	if (job->size - begin > SC2_INPUT_SIZE - SC2_INPUT_PADDING - keep)
+		return -E2BIG;
+	if (!keep && job->size - begin == st->headers.size &&
+	    !memcmp(st->headers.data, data + begin, job->size - begin))
+		return 0;
+	*update = true;
+	next->size = keep + job->size - begin;
+	next->data = kvmalloc(next->size, GFP_KERNEL);
+	if (!next->data)
+		return -ENOMEM;
+	if (keep)
+		memcpy(next->data, st->headers.data, keep);
+	memcpy(next->data + keep, data + begin, job->size - begin);
 	return 0;
 }
 
@@ -757,6 +905,11 @@ int meson_sc2_avs2_decode(struct meson_sc2_hevc_context *ctx,
 	struct sc2_avs2_state *st;
 	struct sc2_surface_owner *owner = NULL;
 	struct meson_sc2_surface *s;
+	struct sc2_avs2_headers next_headers = {};
+	struct meson_sc2_avs2_job replay_job;
+	const struct meson_sc2_avs2_job *run_job = job;
+	size_t replay;
+	bool update_headers;
 	s32 fw_status = -EIO;
 	bool recovered, picture = false, started = false;
 	u32 old_start_flag;
@@ -796,26 +949,46 @@ int meson_sc2_avs2_decode(struct meson_sc2_hevc_context *ctx,
 			goto unlock;
 		}
 	}
-	memcpy(ctx->input, job->data, job->size);
-	memset(ctx->input + job->size, 0, SC2_INPUT_PADDING);
+	ret = sc2_avs2_cache_headers(st, job, &next_headers,
+				     &update_headers, &replay);
+	if (ret) {
+		/* Preparation errors are consumed errors, not retryable probes. */
+		sc2_avs2_error_reset(ctx);
+		goto unlock;
+	}
+	if (replay) {
+		replay_job = (struct meson_sc2_avs2_job) {
+			.data = st->headers.data, .size = replay,
+		};
+		run_job = &replay_job;
+	}
 	if (s) {
 		ret = sc2_pin_output(hw, &job->output);
 		if (ret)
 			goto unlock;
 	}
+submit:
+	/* Replay is its own bounded, zero-picture firmware submission. Never
+	 * reject individually valid inputs just because their sum exceeds DMA.
+	 */
+	memcpy(ctx->input, run_job->data, run_job->size);
+	memset(ctx->input + run_job->size, 0, SC2_INPUT_PADDING);
 	ret = sc2_power_on(hw);
 	if (ret)
 		goto unpin;
 	started = true;
 	ret = sc2_prepare(hw);
 	if (!ret) {
+		fw_status = -EIO;
 		ret = meson_sm_call(hw->firmware, SM_VIDEO_FW_LOAD, &fw_status,
 				    27, 2, 0, 0, 0);
 		if (!ret && fw_status)
 			ret = -EIO;
 	}
 	if (!ret)
-		ret = sc2_avs2_run(ctx, job, result, &picture);
+		ret = sc2_avs2_run(ctx, run_job, result, &picture);
+	if (!ret && run_job != job && (picture || !result->hidden))
+		ret = -EPROTO;
 	if (!ret) {
 		/* Preserve firmware-updated sequence/per-picture weighting RAM
 		 * before the shared engine reset or another codec can overwrite it.
@@ -833,6 +1006,14 @@ int meson_sc2_avs2_decode(struct meson_sc2_hevc_context *ctx,
 	}
 	if (!ret && (recovered || atomic_read(&ctx->aborted)))
 		ret = recovered ? -EIO : -ECANCELED;
+	if (!ret && run_job != job) {
+		sc2_power_off(hw);
+		st->headers.replay = false;
+		old_start_flag = st->start_flag;
+		run_job = job;
+		memset(result, 0, sizeof(*result));
+		goto submit;
+	}
 	dma_rmb();
 	if (!ret && picture && (!sc2_surface_guards(s) ||
 	    memchr_inv(owner->private_mv + s->mv_size, SC2_GUARD_BYTE, SC2_GUARD_SIZE)))
@@ -858,6 +1039,14 @@ int meson_sc2_avs2_decode(struct meson_sc2_hevc_context *ctx,
 	sc2_power_off(hw);
  unpin:
 	sc2_unpin_output(hw);
+	if (!ret) {
+		if (update_headers) {
+			st->pending_headers = next_headers;
+			st->headers_pending = true;
+			next_headers.data = NULL;
+		}
+		st->headers.replay = false;
+	}
 	if (ret == -EPIPE) {
 		st->start_flag = old_start_flag;
 	} else if (ret && started && !hw->fatal) {
@@ -868,6 +1057,7 @@ int meson_sc2_avs2_decode(struct meson_sc2_hevc_context *ctx,
 		sc2_avs2_error_reset(ctx);
 	}
  unlock:
+	kvfree(next_headers.data);
 	mutex_unlock(&hw->lock);
 	return ret;
 }

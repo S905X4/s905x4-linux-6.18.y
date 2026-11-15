@@ -9,8 +9,9 @@
 #define MESON_SC2_AVS2_MAX_WIDTH 3840U
 #define MESON_SC2_AVS2_MAX_HEIGHT 2160U
 
-/* One complete start-code-delimited access unit, including any preceding
- * sequence header. CAPTURE is AMF8/AMF0 FBC, never a DW8 surrogate.
+/* One complete start-code-delimited picture AU or a header-only AU. Sequence
+ * headers may precede the picture in earlier submissions. CAPTURE is AMF8/AMF0
+ * FBC, never a DW8 surrogate.
  * output.destination and output.output_buffer must describe that same object,
  * or both be NULL for an actual firmware header probe before CAPTURE exists.
  * The caller keeps each surface alive while surface_busy() returns true.
@@ -41,6 +42,17 @@ struct meson_sc2_avs2_result {
 int meson_sc2_avs2_decode(struct meson_sc2_hevc_context *context,
 			const struct meson_sc2_avs2_job *job,
 			struct meson_sc2_avs2_result *result);
+/* Only for a source-change CAPTURE stop after the worker and old presentations
+ * have drained. Retires DPB/workspace but retains consumed encoded headers for
+ * the queued -EPIPE AU. Ordinary STREAMOFF/seek uses context_reset instead.
+ */
+int meson_sc2_avs2_capture_restart(struct meson_sc2_hevc_context *context);
+/* Acknowledge removal of the head SRC only after the frontend's abort check.
+ * Header-only success commits its prefix; a consumed picture/error retires it.
+ * An unconsumed source must instead survive CAPTURE restart or full reset.
+ */
+void meson_sc2_avs2_source_consumed(struct meson_sc2_hevc_context *context,
+				    bool picture, int status);
 /* Returns -EAGAIN when no output is ready. drain presents remaining reordered
  * pictures for DECODER_CMD_STOP without retiring reference/background state;
  * DECODER_CMD_START may resume dependent access units. STREAMOFF resets DPB.

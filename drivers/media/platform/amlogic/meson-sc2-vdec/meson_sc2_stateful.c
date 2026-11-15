@@ -90,6 +90,8 @@ struct sc2_stateful_ctx {
 	bool poll_output;
 	bool reconfigure;
 	bool reconfigure_needs_off;
+	/* Head AVS2 SRC still owes a replay, even after CAPTURE ON. */
+	bool avs2_replay_pending;
 	bool last_sent;
 	bool draining;
 	bool drain_ready;
@@ -630,7 +632,7 @@ static void sc2_stateful_quiesce(struct sc2_stateful_ctx *ctx, bool capture_stop
 {
 	struct sc2_stateful_picture picture;
 	struct sc2_stateful_buffer *buf;
-	bool preserve;
+	bool preserve, restart;
 	int ret;
 
 	WRITE_ONCE(ctx->aborting, true);
@@ -641,6 +643,8 @@ static void sc2_stateful_quiesce(struct sc2_stateful_ctx *ctx, bool capture_stop
 	mutex_lock(&ctx->state_lock);
 	preserve = capture_stop && !sc2_stateful_avs2(ctx) &&
 		ctx->reconfigure && ctx->reconfigure_needs_off && ctx->last_sent;
+	restart = capture_stop && sc2_stateful_avs2(ctx) &&
+		ctx->avs2_replay_pending;
 	if (!meson_sc2_hevc_context_fatal(ctx->hwctx)) {
 		if (ctx->pending_valid)
 			sc2_stateful_put(ctx, ctx->pending.surface);
@@ -650,8 +654,12 @@ static void sc2_stateful_quiesce(struct sc2_stateful_ctx *ctx, bool capture_stop
 			if (buf->user_output)
 				sc2_stateful_put(ctx, &buf->surface);
 	}
-	ret = preserve ? meson_sc2_vp9_capture_restart(ctx->hwctx) :
-		meson_sc2_hevc_context_reset(ctx->hwctx);
+	if (preserve)
+		ret = meson_sc2_vp9_capture_restart(ctx->hwctx);
+	else if (restart)
+		ret = meson_sc2_avs2_capture_restart(ctx->hwctx);
+	else
+		ret = meson_sc2_hevc_context_reset(ctx->hwctx);
 	ctx->pending_valid = false;
 	ctx->poll_output = false;
 	ctx->retry_wait = false;
@@ -742,6 +750,7 @@ static void sc2_stateful_stop(struct vb2_queue *q)
 		ctx->header_known = false;
 		ctx->reconfigure = false;
 		ctx->reconfigure_needs_off = false;
+		ctx->avs2_replay_pending = false;
 		ctx->draining = false;
 		ctx->drain_ready = false;
 		ctx->drain_tail = NULL;
@@ -961,6 +970,9 @@ static void sc2_stateful_worker(struct work_struct *work)
 			goto finish;
 	}
 	ret = sc2_stateful_decode(ctx, src, dst, &picture);
+	/* Record the obligation even if CAPTURE stop raced the probe return. */
+	if (sc2_stateful_avs2(ctx) && ret == -EPIPE)
+		ctx->avs2_replay_pending = true;
 	if (READ_ONCE(ctx->aborting))
 		goto finish;
 	if (meson_sc2_hevc_context_fatal(ctx->hwctx)) {
@@ -1005,6 +1017,10 @@ static void sc2_stateful_worker(struct work_struct *work)
 		goto finish;
 	}
 	v4l2_m2m_src_buf_remove(ctx->fh.m2m_ctx);
+	if (sc2_stateful_avs2(ctx)) {
+		meson_sc2_avs2_source_consumed(ctx->hwctx, !!picture.surface, ret);
+		ctx->avs2_replay_pending = false;
+	}
 	src->sequence = ctx->source_sequence++;
 	if (ctx->draining && src == ctx->drain_tail) {
 		ctx->drain_ready = true;
