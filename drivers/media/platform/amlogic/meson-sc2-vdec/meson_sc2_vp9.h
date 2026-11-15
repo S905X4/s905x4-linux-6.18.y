@@ -46,12 +46,26 @@ struct sc2_vp9_state {
  u32 count;
  bool need_key;
 };
+static void sc2_vp9_drop_slot(struct meson_sc2_hevc_context *ctx, unsigned int n)
+{
+ struct sc2_vp9_picture *p = &ctx->vp9->slot[n];
+ struct sc2_surface_owner *owner;
+
+ if (!p->surface)
+  return;
+ owner = container_of(p->surface, struct sc2_surface_owner, surface);
+ memset(p, 0, sizeof(*p));
+ sc2_surface_owner_put(ctx->hw, owner);
+}
+
 static void sc2_vp9_reset(struct meson_sc2_hevc_context *ctx)
 {
  struct sc2_vp9_state *st = ctx->vp9;
+ unsigned int i;
  if (!st)
   return;
- memset(st->slot, 0, sizeof(st->slot));
+ for (i = 0; i < V9_SLOTS; i++)
+  sc2_vp9_drop_slot(ctx, i);
  memset(st->refs, -1, sizeof(st->refs));
  st->previous = -1;
  st->head = st->tail = st->pending_count = 0;
@@ -61,8 +75,12 @@ static void sc2_vp9_reset(struct meson_sc2_hevc_context *ctx)
 }
 static void sc2_vp9_release(struct meson_sc2_hevc_context *ctx)
 {
+ unsigned int i;
+
  if (!ctx->vp9)
   return;
+ for (i = 0; i < V9_SLOTS; i++)
+  sc2_vp9_drop_slot(ctx, i);
  kfree(ctx->vp9);
  ctx->vp9 = NULL;
 }
@@ -91,6 +109,28 @@ static bool sc2_vp9_slot_busy(struct sc2_vp9_state *st, unsigned int n)
    return true;
  return false;
 }
+static void sc2_vp9_reclaim(struct meson_sc2_hevc_context *ctx)
+{
+ unsigned int i;
+
+ for (i = 0; i < V9_SLOTS; i++)
+  if (!sc2_vp9_slot_busy(ctx->vp9, i))
+   sc2_vp9_drop_slot(ctx, i);
+}
+
+int meson_sc2_vp9_capture_restart(struct meson_sc2_hevc_context *ctx)
+{
+ int ret = 0;
+
+ mutex_lock(&ctx->hw->lock);
+ if (ctx->hw->fatal)
+  ret = -EIO;
+ else
+  atomic_set(&ctx->aborted, 0);
+ mutex_unlock(&ctx->hw->lock);
+ return ret;
+}
+
 bool meson_sc2_vp9_surface_busy(struct meson_sc2_hevc_context *ctx,
                                struct meson_sc2_surface *s)
 {
@@ -99,7 +139,8 @@ bool meson_sc2_vp9_surface_busy(struct meson_sc2_hevc_context *ctx,
  mutex_lock(&ctx->hw->lock);
  if (ctx->vp9)
   for (i = 0; i < V9_SLOTS; i++)
-   if (ctx->vp9->slot[i].surface == s)
+   if (ctx->vp9->slot[i].surface &&
+       ctx->vp9->slot[i].surface->cpu == s->cpu)
     busy = sc2_vp9_slot_busy(ctx->vp9, i);
  mutex_unlock(&ctx->hw->lock);
  return busy;
@@ -112,8 +153,12 @@ int meson_sc2_vp9_put_output(struct meson_sc2_hevc_context *ctx,
  mutex_lock(&ctx->hw->lock);
  if (ctx->vp9)
   for (i = 0; i < V9_SLOTS; i++)
-   if (ctx->vp9->slot[i].surface == s && ctx->vp9->slot[i].outstanding) {
+   if (ctx->vp9->slot[i].surface &&
+       ctx->vp9->slot[i].surface->cpu == s->cpu &&
+       ctx->vp9->slot[i].outstanding) {
     ctx->vp9->slot[i].outstanding--;
+    if (!sc2_vp9_slot_busy(ctx->vp9, i))
+     sc2_vp9_drop_slot(ctx, i);
     ret = 0;
     break;
    }
@@ -271,11 +316,12 @@ static int sc2_vp9_adapt(struct meson_sc2_hevc_context *ctx, int slot_index)
 }
 static int sc2_vp9_header(struct meson_sc2_hevc_context *ctx,
                           const struct meson_sc2_vp9_job *job,
+                          struct sc2_surface_owner *owner,
                           struct meson_sc2_vp9_result *result, int *slot_index)
 {
  struct sc2_vp9_state *st = ctx->vp9;
  struct meson_sc2_hw *hw = ctx->hw;
- struct meson_sc2_surface *s = job->output.destination, *ref;
+ struct meson_sc2_surface *s = owner ? &owner->surface : NULL, *ref;
  union sc2_vp9_rpm *r = &st->rpm;
  const __le16 *raw = st->work + V9_RPM;
  __le32 *map = st->work + V9_MAP;
@@ -285,12 +331,23 @@ static int sc2_vp9_header(struct meson_sc2_hevc_context *ctx,
  dma_rmb();
  for (i = 0; i < ARRAY_SIZE(r->words); i++)
   r->words[i] = le16_to_cpu(raw[(i & ~3) + 3 - (i & 3)]);
- if (r->p.show_existing_frame) {
-  if (r->p.frame_to_show_idx > 7 || st->refs[r->p.frame_to_show_idx] < 0)
-   return -EBADMSG;
-  *slot_index = st->refs[r->p.frame_to_show_idx];
-  sc2_write(hw, HEVC_ASSIST_SCRATCH_0, 5);
-  return 0;
+ /* Supported repeats are resolved before entering the firmware. */
+ if (r->p.show_existing_frame)
+  return -EBADMSG;
+ if (r->p.frame_type && !r->p.intra_only) {
+  for (i = 0; i < 3; i++) {
+   if (!(r->p.same_frame_size & BIT(2 - i)))
+    continue;
+   j = (r->p.ref_info >> ((2 - i) * 4 + 1)) & 7;
+   if (st->refs[j] < 0)
+    return -EBADMSG;
+   ref = st->slot[st->refs[j]].surface;
+   if (!ref || !ref->valid)
+    return -EBADMSG;
+   r->p.width = ref->width;
+   r->p.height = ref->height;
+   break;
+  }
  }
  result->width = r->p.width;
  result->height = r->p.height;
@@ -313,6 +370,8 @@ static int sc2_vp9_header(struct meson_sc2_hevc_context *ctx,
  }
  if (n < 0)
   return -ENOSPC;
+ sc2_vp9_drop_slot(ctx, n);
+ owner->references++;
  st->slot[n] = (struct sc2_vp9_picture) {
   .surface = s, .timestamp = job->timestamp, .key = !r->p.frame_type,
   .intra = r->p.intra_only, .show = r->p.show_frame,
@@ -406,10 +465,10 @@ static int sc2_vp9_header(struct meson_sc2_hevc_context *ctx,
 }
 static int sc2_vp9_run(struct meson_sc2_hevc_context *ctx,
                        const struct meson_sc2_vp9_job *job,
+                       struct sc2_surface_owner *owner,
                        struct meson_sc2_vp9_result *result, int *slot_index)
 {
  struct meson_sc2_hw *hw = ctx->hw;
- struct sc2_vp9_state *st = ctx->vp9;
  unsigned long deadline = jiffies + SC2_JOB_TIMEOUT, remaining;
  u32 seq, status;
  bool header = false;
@@ -434,19 +493,17 @@ static int sc2_vp9_run(struct meson_sc2_hevc_context *ctx,
   if (status == 0xf0) {
    if (header)
     return -EPROTO;
-   ret = sc2_vp9_header(ctx, job, result, slot_index);
+   ret = sc2_vp9_header(ctx, job, owner, result, slot_index);
    if (ret)
     return ret;
    header = true;
    continue;
   }
-  if (header && (status == 0x0a ||
-    (st->rpm.p.show_existing_frame && (status == 0x0e || status == 0x20)))) {
-   if (!st->rpm.p.show_existing_frame &&
-    ((sc2_read(hw, HEVC_PARSER_LCU_START) & 0xffffff) !=
-     DIV_ROUND_UP(result->width, 64) * DIV_ROUND_UP(result->height, 64) - 1 ||
-     (sc2_read(hw, SC2_SAO_MMU_STATUS) >> 16) >
-      DIV_ROUND_UP(job->output.destination->body_size, SZ_4K)))
+  if (header && status == 0x0a) {
+   if ((sc2_read(hw, HEVC_PARSER_LCU_START) & 0xffffff) !=
+       DIV_ROUND_UP(result->width, 64) * DIV_ROUND_UP(result->height, 64) - 1 ||
+       (sc2_read(hw, SC2_SAO_MMU_STATUS) >> 16) >
+       DIV_ROUND_UP(job->output.destination->body_size, SZ_4K))
     return -EIO;
    return 0;
   }
@@ -459,6 +516,130 @@ static int sc2_vp9_run(struct meson_sc2_hevc_context *ctx,
    smp_load_acquire(&hw->irq_sequence) != seq, remaining);
  }
 }
+/* An orphaned CAPTURE reference still owns its original FBC and MV storage.
+ * A repeat needs a buffer in the current queue. Relocate only the compressed
+ * display bytes; the original DPB/MV and previous-picture identity stay put.
+ */
+static int sc2_vp9_display_detached(struct meson_sc2_hevc_context *ctx,
+                                  const struct meson_sc2_vp9_job *job,
+                                  struct sc2_surface_owner *owner, int *slot_index)
+{
+ struct sc2_vp9_state *st = ctx->vp9;
+ struct sc2_vp9_picture *picture = &st->slot[*slot_index];
+ struct meson_sc2_surface *src = picture->surface, *dst = &owner->surface;
+ struct sc2_surface_owner *source_owner;
+ const __le32 *source_header = src->cpu;
+ __le32 *target_header = dst->cpu;
+ dma_addr_t source_body = src->dma + src->body_offset;
+ dma_addr_t target_body = dst->dma + dst->body_offset;
+ u32 columns = DIV_ROUND_UP(src->width, 64);
+ u32 entries = columns * DIV_ROUND_UP(src->height, 64) * 32;
+ u32 i, x, y, word, offset, used = 0;
+ dma_addr_t page;
+ int n;
+
+ source_owner = container_of(src, struct sc2_surface_owner, surface);
+ if (!source_owner->detached)
+  return 0;
+ if (src->dma == dst->dma || src->size != dst->size ||
+     src->width != dst->width || src->height != dst->height ||
+     src->depth != dst->depth || src->body_offset != dst->body_offset ||
+     src->body_size != dst->body_size ||
+     src->header_alloc_size != dst->header_alloc_size ||
+     entries * sizeof(*source_header) > src->header_alloc_size)
+  return -EINVAL;
+ if (!sc2_surface_guards(src) ||
+     memchr_inv(source_header + entries, 0,
+                src->header_alloc_size - entries * sizeof(*source_header)))
+  return -EIO;
+ for (n = 0; n < V9_SLOTS; n++)
+  if (!sc2_vp9_slot_busy(st, n))
+   break;
+ if (n == V9_SLOTS)
+  return -ENOSPC;
+ /* Rebase every populated tile entry, including edge padding, so no address
+  * can retain the old allocation. Preserve mode, subpage offset and flags.
+  */
+ for (i = 0; i < entries; i++) {
+  word = le32_to_cpu(source_header[i]);
+  if (word) {
+   page = (dma_addr_t)(word & GENMASK(29, 10)) << 2;
+   if (page < source_body || page - source_body > src->body_size - SZ_4K)
+    return -EBADMSG;
+   offset = page - source_body;
+   used = max(used, offset + (u32)SZ_4K);
+   word = (word & ~GENMASK(29, 10)) | ((target_body + offset) >> 2);
+  }
+  target_header[i] = cpu_to_le32(word);
+ }
+ for (y = 0; y < DIV_ROUND_UP(src->height, 4); y++)
+  for (x = 0; x < DIV_ROUND_UP(src->width, 32); x++) {
+   i = ((y / 16) * columns + x / 2) * 32 + (y % 16) * 2 + x % 2;
+   if (!source_header[i])
+    return -EBADMSG;
+  }
+ memset(target_header + entries, 0,
+        dst->header_alloc_size - entries * sizeof(*target_header));
+ memcpy(dst->cpu + dst->body_offset, src->cpu + src->body_offset, used);
+ dma_wmb();
+ sc2_vp9_drop_slot(ctx, n);
+ owner->references++;
+ st->slot[n] = *picture;
+ st->slot[n].surface = dst;
+ st->slot[n].outstanding = 0;
+ dst->valid = job->output.destination->valid = true;
+ dst->poc = job->output.destination->poc = src->poc;
+ *slot_index = n;
+ return 0;
+}
+
+static void sc2_vp9_queue_output(struct sc2_vp9_state *st, int slot, u64 timestamp)
+{
+ st->slot[slot].outstanding++;
+ st->pending[st->tail].slot = slot;
+ st->pending[st->tail].timestamp = timestamp;
+ st->tail = (st->tail + 1) % ARRAY_SIZE(st->pending);
+ st->pending_count++;
+}
+
+/* show_existing has no coded pixels or new MV/probability state. SC2's
+ * no-head firmware consumes it without a header interrupt; do not submit it
+ * as a decode or manufacture PIC_DONE. Only a completed reference may show.
+ */
+static int sc2_vp9_repeat(struct meson_sc2_hevc_context *ctx,
+                         const struct meson_sc2_vp9_job *job,
+                         struct sc2_surface_owner *owner,
+                         struct meson_sc2_vp9_result *result)
+{
+ struct sc2_vp9_state *st = ctx->vp9;
+ const u8 prefix = *(const u8 *)job->data;
+ struct meson_sc2_surface *ref, *dst = owner ? &owner->surface : NULL;
+ int slot = st->refs[prefix & 7], ret;
+
+ if (slot < 0)
+  return -EBADMSG;
+ ref = st->slot[slot].surface;
+ if (!ref || !ref->valid || ref->depth != (prefix & BIT(4) ? 10 : 8))
+  return -EBADMSG;
+ result->width = ref->width;
+ result->height = ref->height;
+ result->depth = ref->depth;
+ if (!dst || dst->width != ref->width || dst->height != ref->height ||
+     dst->depth != ref->depth)
+  return -EPIPE;
+ ret = sc2_vp9_display_detached(ctx, job, owner, &slot);
+ if (ret)
+  return ret;
+ if (!sc2_surface_guards(st->slot[slot].surface))
+  return -EIO;
+ sc2_vp9_queue_output(st, slot, job->timestamp);
+ result->surface = st->slot[slot].surface;
+ result->timestamp = job->timestamp;
+ result->poc = result->surface->poc;
+ result->hidden = false;
+ return 0;
+}
+
 int meson_sc2_vp9_decode(struct meson_sc2_hevc_context *ctx,
                          const struct meson_sc2_vp9_job *job,
                          struct meson_sc2_vp9_result *result)
@@ -505,6 +686,19 @@ int meson_sc2_vp9_decode(struct meson_sc2_hevc_context *ctx,
   }
   owner->context = ctx;
  }
+ /* Profiles 0/2 use the same eight-bit repeat header: marker 10,
+  * profile-low 0, show_existing 1, followed by the three-bit reference.
+  */
+ if ((*(const u8 *)job->data & 0xe8) == 0x88) {
+  ret = sc2_vp9_repeat(ctx, job, owner, result);
+  if (ret && ret != -EPIPE) {
+   st->need_key = true;
+   memset(st->refs, -1, sizeof(st->refs));
+   st->previous = -1;
+  }
+  sc2_vp9_reclaim(ctx);
+  goto unlock;
+ }
  memcpy(ctx->input, job->data, job->size);
  memset(ctx->input + job->size, 0, SC2_INPUT_PADDING + 64);
  ret = owner ? sc2_pin_output(hw, &job->output) : 0;
@@ -520,7 +714,7 @@ int meson_sc2_vp9_decode(struct meson_sc2_hevc_context *ctx,
    ret = -EIO;
  }
  if (!ret)
-  ret = sc2_vp9_run(ctx, job, result, &slot_index);
+  ret = sc2_vp9_run(ctx, job, owner, result, &slot_index);
  drain = sc2_drain(hw, &recovered);
  if (drain) {
   sc2_quarantine(hw, drain);
@@ -535,25 +729,19 @@ int meson_sc2_vp9_decode(struct meson_sc2_hevc_context *ctx,
    SC2_GUARD_BYTE, SC2_GUARD_SIZE)))
   ret = -EIO;
  if (!ret) {
-  if (!st->rpm.p.show_existing_frame) {
-   owner->surface.valid = job->output.destination->valid = true;
-   owner->surface.poc = job->output.destination->poc = st->count++;
-   result->surface = job->output.destination;
-   result->timestamp = job->timestamp;
-   result->poc = job->output.destination->poc;
-   refresh = !st->rpm.p.frame_type ? 255 : st->rpm.p.refresh_frame_flags;
-   for (i = 0; i < 8; i++)
-    if (refresh & BIT(i))
-     st->refs[i] = slot_index;
-   st->previous = slot_index;
-   st->need_key = false;
-  }
-  if (st->rpm.p.show_existing_frame || st->rpm.p.show_frame) {
-   st->slot[slot_index].outstanding++;
-   st->pending[st->tail].slot = slot_index;
-   st->pending[st->tail].timestamp = job->timestamp;
-   st->tail = (st->tail + 1) % ARRAY_SIZE(st->pending);
-   st->pending_count++;
+  owner->surface.valid = job->output.destination->valid = true;
+  owner->surface.poc = job->output.destination->poc = st->count++;
+  result->surface = job->output.destination;
+  result->timestamp = job->timestamp;
+  result->poc = job->output.destination->poc;
+  refresh = !st->rpm.p.frame_type ? 255 : st->rpm.p.refresh_frame_flags;
+  for (i = 0; i < 8; i++)
+   if (refresh & BIT(i))
+    st->refs[i] = slot_index;
+  st->previous = slot_index;
+  st->need_key = false;
+  if (st->rpm.p.show_frame) {
+   sc2_vp9_queue_output(st, slot_index, job->timestamp);
    result->hidden = false;
   }
  } else if (ret != -EPIPE && ret != -EAGAIN) {
@@ -562,6 +750,7 @@ int meson_sc2_vp9_decode(struct meson_sc2_hevc_context *ctx,
   memset(st->refs, -1, sizeof(st->refs));
   st->previous = -1;
  }
+ sc2_vp9_reclaim(ctx);
  sc2_power_off(hw);
 unpin:
  sc2_unpin_output(hw);

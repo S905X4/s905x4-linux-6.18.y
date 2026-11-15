@@ -173,8 +173,10 @@ static struct sc2_stateful_buffer *sc2_stateful_find(struct sc2_stateful_ctx *ct
 {
 	struct sc2_stateful_buffer *buf;
 
+	if (!surface || !surface->cpu)
+		return NULL;
 	list_for_each_entry(buf, &ctx->captures, capture_entry)
-		if (&buf->surface == surface)
+		if (buf->surface.cpu == surface->cpu && buf->surface.dma == surface->dma)
 			return buf;
 	return NULL;
 }
@@ -575,7 +577,7 @@ static void sc2_stateful_buf_cleanup(struct vb2_buffer *vb)
 		return;
 	mutex_lock(&ctx->state_lock);
 	list_del(&buf->capture_entry);
-	/* The hardware owner retains its own export/MV pin in fatal quarantine. */
+	/* Codec picture pins may outlive this CAPTURE binding. Fatal DMA retains all pins. */
 	meson_sc2_surface_free(ctx->node->hw, &buf->surface);
 	if (buf->export)
 		dma_buf_put(buf->export);
@@ -623,11 +625,12 @@ static void sc2_stateful_retry(struct work_struct *work)
 	v4l2_m2m_try_schedule(ctx->fh.m2m_ctx);
 }
 
-/* Caller has stopped new submissions. Drain/reset precede every surface free. */
-static void sc2_stateful_quiesce(struct sc2_stateful_ctx *ctx)
+/* Caller has stopped submissions; a source-change CAPTURE stop is not a seek. */
+static void sc2_stateful_quiesce(struct sc2_stateful_ctx *ctx, bool capture_stop)
 {
 	struct sc2_stateful_picture picture;
 	struct sc2_stateful_buffer *buf;
+	bool preserve;
 	int ret;
 
 	WRITE_ONCE(ctx->aborting, true);
@@ -636,6 +639,8 @@ static void sc2_stateful_quiesce(struct sc2_stateful_ctx *ctx)
 	cancel_delayed_work_sync(&ctx->retry_work);
 	flush_work(&ctx->work);
 	mutex_lock(&ctx->state_lock);
+	preserve = capture_stop && !sc2_stateful_avs2(ctx) &&
+		ctx->reconfigure && ctx->reconfigure_needs_off && ctx->last_sent;
 	if (!meson_sc2_hevc_context_fatal(ctx->hwctx)) {
 		if (ctx->pending_valid)
 			sc2_stateful_put(ctx, ctx->pending.surface);
@@ -645,14 +650,16 @@ static void sc2_stateful_quiesce(struct sc2_stateful_ctx *ctx)
 			if (buf->user_output)
 				sc2_stateful_put(ctx, &buf->surface);
 	}
-	ret = meson_sc2_hevc_context_reset(ctx->hwctx);
+	ret = preserve ? meson_sc2_vp9_capture_restart(ctx->hwctx) :
+		meson_sc2_hevc_context_reset(ctx->hwctx);
 	ctx->pending_valid = false;
 	ctx->poll_output = false;
 	ctx->retry_wait = false;
 	ctx->decode_blocked = false;
 	list_for_each_entry(buf, &ctx->captures, capture_entry) {
 		buf->user_output = false;
-		buf->surface.valid = false;
+		if (!preserve)
+			buf->surface.valid = false;
 	}
 	if (ret)
 		sc2_stateful_fail(ctx);
@@ -727,7 +734,7 @@ static void sc2_stateful_stop(struct vb2_queue *q)
 {
 	struct sc2_stateful_ctx *ctx = vb2_get_drv_priv(q);
 
-	sc2_stateful_quiesce(ctx);
+	sc2_stateful_quiesce(ctx, !V4L2_TYPE_IS_OUTPUT(q->type));
 	mutex_lock(&ctx->state_lock);
 	sc2_stateful_return_queue(ctx, q->type, VB2_BUF_STATE_ERROR);
 	if (V4L2_TYPE_IS_OUTPUT(q->type)) {
@@ -1204,7 +1211,7 @@ static int sc2_stateful_release(struct file *file)
 	struct meson_sc2_stateful *node = ctx->node;
 
 	mutex_lock(&node->lock);
-	sc2_stateful_quiesce(ctx);
+	sc2_stateful_quiesce(ctx, false);
 	v4l2_m2m_ctx_release(ctx->fh.m2m_ctx);
 	list_del(&ctx->entry);
 	v4l2_fh_del(&ctx->fh, file);
@@ -1306,7 +1313,7 @@ void meson_sc2_stateful_unregister(struct meson_sc2_stateful *node)
 	mutex_lock(&node->lock);
 	WRITE_ONCE(node->removing, true);
 	list_for_each_entry(ctx, &node->contexts, entry) {
-		sc2_stateful_quiesce(ctx);
+		sc2_stateful_quiesce(ctx, false);
 		vb2_queue_error(v4l2_m2m_get_src_vq(ctx->fh.m2m_ctx));
 		vb2_queue_error(v4l2_m2m_get_dst_vq(ctx->fh.m2m_ctx));
 	}

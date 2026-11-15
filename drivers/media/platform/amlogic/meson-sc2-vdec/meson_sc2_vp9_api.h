@@ -20,6 +20,10 @@ struct meson_sc2_vp9_result {
 	s32 poc;
 	bool hidden;
 };
+/* Caller has aborted and joined its worker, and released old presentations.
+ * Keep the committed references/workspace when restarting CAPTURE only.
+ */
+int meson_sc2_vp9_capture_restart(struct meson_sc2_hevc_context *context);
 int meson_sc2_vp9_decode(struct meson_sc2_hevc_context *context,
 			const struct meson_sc2_vp9_job *job,
 			struct meson_sc2_vp9_result *result);

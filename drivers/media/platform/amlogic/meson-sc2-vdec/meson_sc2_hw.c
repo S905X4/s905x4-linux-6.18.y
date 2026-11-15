@@ -110,6 +110,9 @@ struct sc2_surface_owner {
 	struct meson_sc2_hevc_context *context;
 	struct dma_buf *capture_buffer;
 	void *private_mv;
+	/* Additional picture pins, protected by hw->lock. */
+	unsigned int references;
+	bool detached;
 };
 
 struct meson_sc2_hevc_context {
@@ -783,6 +786,32 @@ int meson_sc2_av1_fbc_bind(struct meson_sc2_hevc_context *ctx,
 			    cpu, dma, size, buffer);
 }
 
+static void sc2_surface_owner_free(struct meson_sc2_hw *hw,
+				   struct sc2_surface_owner *owner)
+{
+	list_del(&owner->list);
+	if (owner->capture_buffer) {
+		dma_free_coherent(hw->dev,
+			owner->surface.mv_size + SC2_GUARD_SIZE,
+			owner->private_mv, owner->surface.mv_dma);
+		dma_buf_put(owner->capture_buffer);
+	} else {
+		dma_free_coherent(hw->dev, owner->surface.size,
+				  owner->surface.cpu, owner->surface.dma);
+	}
+	kfree(owner);
+}
+
+static void sc2_surface_owner_put(struct meson_sc2_hw *hw,
+				  struct sc2_surface_owner *owner)
+{
+	if (WARN_ON(!owner->references))
+		return;
+	owner->references--;
+	if (!owner->references && owner->detached && !hw->fatal)
+		sc2_surface_owner_free(hw, owner);
+}
+
 void meson_sc2_surface_free(struct meson_sc2_hw *hw,
 			   struct meson_sc2_surface *surface)
 {
@@ -794,19 +823,9 @@ void meson_sc2_surface_free(struct meson_sc2_hw *hw,
 	list_for_each_entry(owner, &hw->surfaces, list) {
 		if (owner->surface.cpu != surface->cpu)
 			continue;
-		if (!hw->fatal) {
-			list_del(&owner->list);
-			if (owner->capture_buffer) {
-				dma_free_coherent(hw->dev,
-					owner->surface.mv_size + SC2_GUARD_SIZE,
-					owner->private_mv, owner->surface.mv_dma);
-				dma_buf_put(owner->capture_buffer);
-			} else {
-				dma_free_coherent(hw->dev, owner->surface.size,
-						  owner->surface.cpu, owner->surface.dma);
-			}
-			kfree(owner);
-		}
+		owner->detached = true;
+		if (!owner->references && !hw->fatal)
+			sc2_surface_owner_free(hw, owner);
 		memset(surface, 0, sizeof(*surface));
 		break;
 	}
